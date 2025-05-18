@@ -172,7 +172,7 @@
       e.preventDefault();         // Don’t reload page
       msg.innerHTML = '';         // Clear old messages
       const url = document.getElementById('youtube_url').value;
-      btn.disabled = true;        // Prevent double‑click
+      btn.disabled = true;        // Prevent double-click
       btn.innerText = 'Starting…';
       prog.style.display = 'block'; // Show progress area
 
@@ -205,7 +205,8 @@
           bar.innerText  = '100%';
           fetchResult(task_id);
         } else if (d.status === 'error') {
-          showError('An error occurred');
+          // Show the server-provided error message if available
+          showError(d.error || 'An error occurred');
         } else {
           setTimeout(poll, 800); // Check again soon
         }
@@ -244,7 +245,7 @@
           </div>`;
       }
 
-      // Re‑enable button for new jobs
+      // Re-enable button for new jobs
       btn.disabled = false;
       btn.innerText = 'Download & Split';
     }
