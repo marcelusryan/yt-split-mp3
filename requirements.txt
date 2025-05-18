@@ -2,3 +2,4 @@ Flask
 pytube
 moviepy
 gunicorn
+yt-dlp
