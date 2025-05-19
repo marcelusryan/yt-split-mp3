@@ -8,98 +8,67 @@ import threading
 import logging
 from flask import Flask, request, render_template, send_from_directory, jsonify
 from yt_dlp import YoutubeDL
+import base64
 
 # ───────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION & SETUP
 # ───────────────────────────────────────────────────────────────────────────────
 
-# Create the Flask “app” object. This starts our web server.
-
-# Read YouTube cookies from an environment variable and write to a temp file
-# (Recommended: store the literal contents of your exported cookies.txt
-# in the Render “YT_COOKIES_DATA” secret.)
-COOKIE_DATA = os.environ.get('YT_COOKIES_DATA')
-if COOKIE_DATA:
+# Decode Base64-encoded YouTube cookies (store in Render’s YT_COOKIES_B64)
+COOKIE_FILE = None
+b64 = os.environ.get('YT_COOKIES_B64')
+if b64:
     COOKIE_FILE = '/tmp/youtube_cookies.txt'
-    with open(COOKIE_FILE, 'w') as f:
-        f.write(COOKIE_DATA)
-else:
-    COOKIE_FILE = None
+    with open(COOKIE_FILE, 'wb') as f:
+        f.write(base64.b64decode(b64))
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# Where downloaded files will be saved on your computer.
-# By default it’s the “Downloads” folder in your home directory.
-DOWNLOAD_BASE = os.path.join(os.path.expanduser("~"), "Downloads")
+# Where to save on the user’s machine
+DOWNLOAD_BASE = os.path.expanduser("~/Downloads")
 
-# A simple pattern to check if the user’s link looks like a YouTube video.
+# Simple YouTube URL validation
 YOUTUBE_REGEX = re.compile(
     r'^(https?://)?(www\.)?'
     r'(youtube\.com/watch\?v=|youtu\.be/)'
     r'[\w\-]{11}(&.*)?$'
 )
 
-# In-memory store for tracking background tasks.
-# Each task has an ID, status, percent complete, and result data.
+# In-memory task store
 tasks = {}
-
-# Turn on logging so we can see what’s happening in the terminal.
-logging.basicConfig(level=logging.INFO)
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# HELPER FUNCTIONS
+# HELPERS
 # ───────────────────────────────────────────────────────────────────────────────
 
 def sanitize_filename(name):
-    """
-    Remove characters that can’t be used in filenames, like / \ : * ? " < > |
-    This ensures saved files have safe, valid names.
-    """
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
 def get_download_folder(video_title):
-    """
-    Create (or reuse) a folder inside Downloads named after the video title.
-    Keeps each video’s files nicely organized.
-    """
-    safe_title = sanitize_filename(video_title)
-    path = os.path.join(DOWNLOAD_BASE, safe_title)
+    safe = sanitize_filename(video_title)
+    path = os.path.join(DOWNLOAD_BASE, safe)
     os.makedirs(path, exist_ok=True)
     return path
 
 def get_folder_size(folder_path):
-    """
-    Calculate total size (in megabytes) of all files in a folder.
-    Used to report how much space was used at the end.
-    """
-    total_bytes = 0
+    total = 0
     for f in os.listdir(folder_path):
-        full_path = os.path.join(folder_path, f)
-        if os.path.isfile(full_path):
-            total_bytes += os.path.getsize(full_path)
-    return total_bytes / (1024 * 1024)
+        p = os.path.join(folder_path, f)
+        if os.path.isfile(p):
+            total += os.path.getsize(p)
+    return total / (1024 * 1024)
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# BACKGROUND TASK: DOWNLOAD & SPLIT
+# BACKGROUND WORKER
 # ───────────────────────────────────────────────────────────────────────────────
 
 def background_task(task_id, youtube_url):
-    """
-    Runs in a separate thread so the web page stays responsive.
-    1) Fetch metadata (title, duration, chapters)
-    2) Download audio
-    3) Split into chapters (or rename full audio if no chapters)
-    4) Update tasks[task_id] with progress & final result
-    """
-    tasks[task_id]['status'] = 'starting'
-    start_time = time.time()
-    app.logger.info(f"[{task_id}] Task started")
-
+    start = time.time()
     try:
-        # 1) Fetch info without downloading
-        # Build yt-dlp options, adding cookiefile from environment if provided
+        # 1) Fetch metadata
         info_opts = {'quiet': True}
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
@@ -107,200 +76,148 @@ def background_task(task_id, youtube_url):
             meta = ydl.extract_info(youtube_url, download=False)
 
         title = meta.get('title', 'YouTube_Audio')
+        chapters = meta.get('chapters', [])
+        tasks[task_id].update(percent=5, status='fetched')
+
+        # Prepare folder
         folder = get_download_folder(title)
-
-        # ────────────────────────────────────────────────
-        # NEW FIX: completely wipe the download folder
-        # ────────────────────────────────────────────────
         if os.path.exists(folder):
-            try:
-                shutil.rmtree(folder)       # remove folder + all its contents
-            except Exception as e:
-                app.logger.error(f"[{task_id}] Failed to remove folder {folder}: {e}")
-        os.makedirs(folder, exist_ok=True)  # recreate it empty
+            shutil.rmtree(folder)
+        os.makedirs(folder, exist_ok=True)
 
-
-        # 2) Download audio (0 → 50%)
+        # 2) Download + convert to MP3 (5→50%)
         def dl_hook(d):
-            if d['status'] == 'downloading' and d.get('total_bytes'):
-                pct = d['downloaded_bytes'] / d['total_bytes'] * 50
-                tasks[task_id].update(percent=pct, status='downloading')
+            if d['status']=='downloading' and d.get('total_bytes'):
+                tasks[task_id].update(
+                    percent=d['downloaded_bytes']/d['total_bytes']*45 + 5,
+                    status='downloading'
+                )
 
         ydl_opts = {
             'format': 'bestaudio/best',
             'progress_hooks': [dl_hook],
+            'outtmpl': os.path.join(folder, 'full_audio.%(ext)s'),
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'outtmpl': os.path.join(folder, 'full_audio'),
-            'quiet': True,
         }
-        # Add cookiefile to download opts if provided
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE
 
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=True)
+            ydl.download([youtube_url])
 
-        # Optional bump to show "processing" before splitting (50 → 75%)
-        tasks[task_id].update(percent=75, status='processing')
-        app.logger.info(f"[{task_id}] Download complete, starting split")
+        tasks[task_id].update(percent=50, status='downloaded')
 
-        # 3) Split into chapters or rename if no chapters
-        chapters = info.get('chapters')
+        # 3) Split or rename
         files = []
         if not chapters:
-            # No chapters found → rename full audio.mp3 → video_title.mp3
-            final_fn = f"{sanitize_filename(title)}.mp3"
+            final_name = f"{sanitize_filename(title)}.mp3"
             os.rename(
                 os.path.join(folder, 'full_audio.mp3'),
-                os.path.join(folder, final_fn)
+                os.path.join(folder, final_name)
             )
-            files = [final_fn]
-            no_chapters = True
+            files = [final_name]
+            no_ch = True
         else:
-            no_chapters = False
+            no_ch = False
             total = len(chapters)
-            for i, ch in enumerate(chapters, start=1):
+            for i, ch in enumerate(chapters, 1):
                 fname = sanitize_filename(ch['title']) + '.mp3'
-                out_path = os.path.join(folder, fname)
-                # Use ffmpeg to cut the segment without re-encoding
-                app.logger.info(f"[{task_id}] Splitting chapter: {fname}")
+                outp = os.path.join(folder, fname)
                 subprocess.run([
                     'ffmpeg',
                     '-i', os.path.join(folder, 'full_audio.mp3'),
                     '-ss', str(ch['start_time']),
                     '-to', str(ch['end_time']),
                     '-c', 'copy',
-                    out_path
+                    outp
                 ], check=True, stderr=subprocess.PIPE)
-                app.logger.info(f"[{task_id}] Split complete: {fname}")
-                # Update progress (75 → 100%)
                 tasks[task_id].update(
-                    percent=75 + (i/total)*25,
+                    percent=50 + (i/total)*45,
                     status='splitting'
                 )
                 files.append(fname)
-            # Remove the temporary full audio file
             os.remove(os.path.join(folder, 'full_audio.mp3'))
 
-        # 4) Finalize
-        duration = time.time() - start_time
+        # 4) Done
+        elapsed = time.time() - start
         tasks[task_id].update(
             percent=100,
             status='done',
             result={
                 'video_title': title,
                 'path': folder,
-                'total_time': f"{duration:.2f}",
+                'total_time': f"{elapsed:.2f}",
                 'total_space': f"{get_folder_size(folder):.2f}",
                 'files': files,
-                'no_chapters': no_chapters
+                'no_chapters': no_ch
             }
         )
-        app.logger.info(f"[{task_id}] Done at 100%: {files}")
 
     except Exception as e:
-        # Record any errors so the front-end can show them
         tasks[task_id].update(status='error', error=str(e))
-        app.logger.error(f"[{task_id}] Error: {e}")
+        app.logger.error(f"[{task_id}] {e}")
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# FLASK ROUTES (API ENDPOINTS)
+# FLASK ROUTES
 # ───────────────────────────────────────────────────────────────────────────────
 
 @app.route('/start', methods=['POST'])
 def start():
-    """
-    Called by the browser to begin a new task.
-    Expects JSON: { youtube_url: "..." }
-    Returns: { task_id: "some-uuid" }
-    """
     data = request.get_json(force=True)
-    url = data.get('youtube_url', '').strip()
-
-    # Validate the URL before starting
+    url = data.get('youtube_url','').strip()
     if not YOUTUBE_REGEX.match(url):
         return jsonify(error="Invalid YouTube URL."), 400
+    tid = str(uuid.uuid4())
+    tasks[tid] = {'status':'queued','percent':0}
+    threading.Thread(target=background_task, args=(tid,url), daemon=True).start()
+    return jsonify(task_id=tid), 202
 
-    # Create a unique ID & initial state
-    task_id = str(uuid.uuid4())
-    tasks[task_id] = {'status': 'queued', 'percent': 0}
-
-    # Start the background thread
-    thread = threading.Thread(
-        target=background_task,
-        args=(task_id, url),
-        daemon=True
-    )
-    thread.start()
-
-    return jsonify(task_id=task_id)
-
-@app.route('/progress/<task_id>')
+@app.route('/progress/<task_id>', methods=['GET'])
 def progress(task_id):
-    """
-    Browser polls this to get current percent & status.
-    Now also returns 'error' when status == 'error'.
-    """
     t = tasks.get(task_id)
     if not t:
-        return jsonify(error="Unknown task"), 404
+        return jsonify(error="Invalid task ID"), 404
+    if t['status']=='error':
+        return jsonify(status='error', error=t.get('error')), 200
+    if t['status']=='done':
+        # We still return 200 so the front-end knows it's complete,
+        # but we rely on /result to grab the actual data.
+        return jsonify(status='done'), 200
+    return jsonify(status=t['status'], percent=t['percent']), 202
 
-    # Base response
-    resp = {
-        'percent': round(t['percent'], 1),
-        'status': t['status']
-    }
+# ───────────────────────────────────────────────────────────────────────────────
+# NEW: Serve the final result for the front-end’s fetchResult()
+# ───────────────────────────────────────────────────────────────────────────────
 
-    # If the task has errored, include the real error text
-    if t['status'] == 'error':
-        resp['error'] = t.get('error')
-
-    return jsonify(resp)
-
-@app.route('/result/<task_id>')
+@app.route('/result/<task_id>', methods=['GET'])
 def result(task_id):
-    """
-    Once done, browser fetches full result here.
-    Returns: { result: { video_title, path, files[], ... } }
-    """
     t = tasks.get(task_id)
     if not t:
-        return jsonify(error="Unknown task"), 404
-    if t['status'] == 'error':
-        return jsonify(error=t.get('error')), 200
+        return jsonify(error="Invalid task ID"), 404
     if t['status'] != 'done':
-        return jsonify(status=t['status']), 202
-    return jsonify(result=t['result'])
+        return jsonify(error="Task not complete"), 400
+    return jsonify(result=t.get('result')), 200
 
 @app.route("/download/<path:filepath>")
 def download_file(filepath):
-    """
-    Serves the generated MP3 files for users to download.
-    """
-    directory = os.path.dirname(filepath)
-    filename = os.path.basename(filepath)
+    directory, filename = os.path.split(filepath)
     return send_from_directory(directory, filename, as_attachment=True)
 
 @app.route("/", methods=["GET"])
 def index():
-    """
-    Renders the main web page (templates/index.html).
-    """
     return render_template("index.html")
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# RUN THE SERVER
+# RUN
 # ───────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Starts the Flask server on http://127.0.0.1:5000
-    # Automatically open browser
     import webbrowser
     webbrowser.open("http://127.0.0.1:5000")
     app.run(debug=True)
