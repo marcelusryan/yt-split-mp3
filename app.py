@@ -93,19 +93,15 @@ def background_task(task_id, youtube_url):
         folder = get_download_folder(title)
 
         # ────────────────────────────────────────────────
-        # NEW FIX:
-        # Remove old files from the folder before starting
-        # This avoids conflicts if you're re-downloading
-        # the same video again (e.g., full_audio.mp3 exists).
+        # NEW FIX: completely wipe the download folder
         # ────────────────────────────────────────────────
         if os.path.exists(folder):
-            for f in os.listdir(folder):
-                file_path = os.path.join(folder, f)
-                try:
-                    if os.path.isfile(file_path) or os.path.islink(file_path):
-                        os.unlink(file_path)  # Deletes the file
-                except Exception as e:
-                    app.logger.error(f"Failed to delete {file_path}. Reason: {e}")
+            try:
+                shutil.rmtree(folder)       # remove folder + all its contents
+            except Exception as e:
+                app.logger.error(f"[{task_id}] Failed to remove folder {folder}: {e}")
+        os.makedirs(folder, exist_ok=True)  # recreate it empty
+
 
         # 2) Download audio (0 → 50%)
         def dl_hook(d):
@@ -226,12 +222,24 @@ def start():
 def progress(task_id):
     """
     Browser polls this to get current percent & status.
-    Returns: { percent: 42.5, status: "downloading" }
+    Now also returns 'error' when status == 'error'.
     """
     t = tasks.get(task_id)
     if not t:
         return jsonify(error="Unknown task"), 404
-    return jsonify(percent=round(t['percent'], 1), status=t['status'])
+
+    # Base response
+    resp = {
+        'percent': round(t['percent'], 1),
+        'status': t['status']
+    }
+
+    # If the task has errored, include the real error text
+    if t['status'] == 'error':
+        resp['error'] = t.get('error')  # <-- new line
+
+    return jsonify(resp)
+
 
 @app.route('/result/<task_id>')
 def result(task_id):
