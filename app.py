@@ -14,6 +14,18 @@ from yt_dlp import YoutubeDL
 # ───────────────────────────────────────────────────────────────────────────────
 
 # Create the Flask “app” object. This starts our web server.
+
+# Read YouTube cookies from an environment variable and write to a temp file
+# (Recommended: store the literal contents of your exported cookies.txt
+# in the Render “YT_COOKIES_DATA” secret.)
+COOKIE_DATA = os.environ.get('YT_COOKIES_DATA')
+if COOKIE_DATA:
+    COOKIE_FILE = '/tmp/youtube_cookies.txt'
+    with open(COOKIE_FILE, 'w') as f:
+        f.write(COOKIE_DATA)
+else:
+    COOKIE_FILE = None
+
 app = Flask(__name__)
 
 # Where downloaded files will be saved on your computer.
@@ -87,8 +99,13 @@ def background_task(task_id, youtube_url):
 
     try:
         # 1) Fetch info without downloading
-        with YoutubeDL({'quiet': True}) as ydl:
+        # Build yt-dlp options, adding cookiefile from environment if provided
+        info_opts = {'quiet': True}
+        if COOKIE_FILE:
+            info_opts['cookiefile'] = COOKIE_FILE
+        with YoutubeDL(info_opts) as ydl:
             meta = ydl.extract_info(youtube_url, download=False)
+
         title = meta.get('title', 'YouTube_Audio')
         folder = get_download_folder(title)
 
@@ -108,6 +125,7 @@ def background_task(task_id, youtube_url):
             if d['status'] == 'downloading' and d.get('total_bytes'):
                 pct = d['downloaded_bytes'] / d['total_bytes'] * 50
                 tasks[task_id].update(percent=pct, status='downloading')
+
         ydl_opts = {
             'format': 'bestaudio/best',
             'progress_hooks': [dl_hook],
@@ -119,6 +137,10 @@ def background_task(task_id, youtube_url):
             'outtmpl': os.path.join(folder, 'full_audio'),
             'quiet': True,
         }
+        # Add cookiefile to download opts if provided
+        if COOKIE_FILE:
+            ydl_opts['cookiefile'] = COOKIE_FILE
+
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(youtube_url, download=True)
 
@@ -181,7 +203,7 @@ def background_task(task_id, youtube_url):
         app.logger.info(f"[{task_id}] Done at 100%: {files}")
 
     except Exception as e:
-        # Record any errors so the front‑end can show them
+        # Record any errors so the front-end can show them
         tasks[task_id].update(status='error', error=str(e))
         app.logger.error(f"[{task_id}] Error: {e}")
 
@@ -236,10 +258,9 @@ def progress(task_id):
 
     # If the task has errored, include the real error text
     if t['status'] == 'error':
-        resp['error'] = t.get('error')  # <-- new line
+        resp['error'] = t.get('error')
 
     return jsonify(resp)
-
 
 @app.route('/result/<task_id>')
 def result(task_id):
