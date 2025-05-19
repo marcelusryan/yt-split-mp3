@@ -38,7 +38,6 @@ YOUTUBE_REGEX = re.compile(
 # In-memory task store
 tasks = {}
 
-
 # ───────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ───────────────────────────────────────────────────────────────────────────────
@@ -58,8 +57,8 @@ def get_folder_size(folder_path):
         p = os.path.join(folder_path, f)
         if os.path.isfile(p):
             total += os.path.getsize(p)
+    # return in MB
     return total / (1024 * 1024)
-
 
 # ───────────────────────────────────────────────────────────────────────────────
 # BACKGROUND WORKER
@@ -81,15 +80,28 @@ def background_task(task_id, youtube_url):
 
         # Prepare folder
         folder = get_download_folder(title)
+
+        # ────────────── NEW: Retry & delay deletion on Windows ──────────────
+        # Windows sometimes holds an MP3 open even after the player closes.
+        # We'll try up to 5 times (1sec apart) before giving up and continuing.
         if os.path.exists(folder):
-            shutil.rmtree(folder)
+            for attempt in range(5):
+                try:
+                    shutil.rmtree(folder)
+                    break
+                except OSError as e:
+                    app.logger.info(f"[{task_id}] Delete attempt {attempt+1}/5 failed: {e}")
+                    time.sleep(1)
+            else:
+                app.logger.warning(f"[{task_id}] Could not fully delete {folder}, proceeding anyway")
         os.makedirs(folder, exist_ok=True)
+        # ───────────────────────────────────────────────────────────────────────
 
         # 2) Download + convert to MP3 (5→50%)
         def dl_hook(d):
-            if d['status']=='downloading' and d.get('total_bytes'):
+            if d['status'] == 'downloading' and d.get('total_bytes'):
                 tasks[task_id].update(
-                    percent=d['downloaded_bytes']/d['total_bytes']*45 + 5,
+                    percent=d['downloaded_bytes'] / d['total_bytes'] * 45 + 5,
                     status='downloading'
                 )
 
@@ -127,19 +139,26 @@ def background_task(task_id, youtube_url):
             for i, ch in enumerate(chapters, 1):
                 fname = sanitize_filename(ch['title']) + '.mp3'
                 outp = os.path.join(folder, fname)
+
+                # ────────────── UPDATED: add '-y' to overwrite without prompt ──────────────
                 subprocess.run([
                     'ffmpeg',
+                    '-y',                        # overwrite existing files
                     '-i', os.path.join(folder, 'full_audio.mp3'),
                     '-ss', str(ch['start_time']),
                     '-to', str(ch['end_time']),
                     '-c', 'copy',
                     outp
                 ], check=True, stderr=subprocess.PIPE)
+                # ────────────────────────────────────────────────────────────────────────────
+
                 tasks[task_id].update(
-                    percent=50 + (i/total)*45,
+                    percent=50 + (i / total) * 45,
                     status='splitting'
                 )
                 files.append(fname)
+
+            # remove the full audio once splits are done
             os.remove(os.path.join(folder, 'full_audio.mp3'))
 
         # 4) Done
@@ -161,7 +180,6 @@ def background_task(task_id, youtube_url):
         tasks[task_id].update(status='error', error=str(e))
         app.logger.error(f"[{task_id}] {e}")
 
-
 # ───────────────────────────────────────────────────────────────────────────────
 # FLASK ROUTES
 # ───────────────────────────────────────────────────────────────────────────────
@@ -174,7 +192,7 @@ def start():
         return jsonify(error="Invalid YouTube URL."), 400
     tid = str(uuid.uuid4())
     tasks[tid] = {'status':'queued','percent':0}
-    threading.Thread(target=background_task, args=(tid,url), daemon=True).start()
+    threading.Thread(target=background_task, args=(tid, url), daemon=True).start()
     return jsonify(task_id=tid), 202
 
 @app.route('/progress/<task_id>', methods=['GET'])
@@ -185,14 +203,8 @@ def progress(task_id):
     if t['status']=='error':
         return jsonify(status='error', error=t.get('error')), 200
     if t['status']=='done':
-        # We still return 200 so the front-end knows it's complete,
-        # but we rely on /result to grab the actual data.
         return jsonify(status='done'), 200
     return jsonify(status=t['status'], percent=t['percent']), 202
-
-# ───────────────────────────────────────────────────────────────────────────────
-# NEW: Serve the final result for the front-end’s fetchResult()
-# ───────────────────────────────────────────────────────────────────────────────
 
 @app.route('/result/<task_id>', methods=['GET'])
 def result(task_id):
@@ -211,7 +223,6 @@ def download_file(filepath):
 @app.route("/", methods=["GET"])
 def index():
     return render_template("index.html")
-
 
 # ───────────────────────────────────────────────────────────────────────────────
 # RUN
