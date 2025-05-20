@@ -24,8 +24,10 @@ if b64:
     with open(COOKIE_FILE, 'wb') as f:
         f.write(decoded)
     logging.info(f"Wrote cookie file ({len(decoded)} bytes) to {COOKIE_FILE}")
-    head = open(COOKIE_FILE, 'r', errors='ignore').read().splitlines()[:5]
-    logging.info("Cookie file head:\n" + "\n".join(head))
+    # — expanded logging to show first 10 cookies —
+    lines = open(COOKIE_FILE, 'r', errors='ignore').read().splitlines()
+    logging.info(f"Cookie file has {len(lines)} lines; here are lines 1–10:\n" +
+                 "\n".join(lines[:10]))
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Tweak these headers to look exactly like a real YouTube watch-page request
