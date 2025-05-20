@@ -9,12 +9,15 @@ RUN apt-get update && \
 # Create app directory
 WORKDIR /app
 
-# Install Python dependencies
+# Copy requirements and upgrade pip + yt-dlp before installing other deps
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --upgrade yt-dlp && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy your application code
 COPY . .
 
 # Use a shell to expand $PORT at runtime
+env PORT 5000
 CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:$PORT app:app"]
