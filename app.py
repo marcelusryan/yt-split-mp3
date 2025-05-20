@@ -6,36 +6,39 @@ import time
 import uuid
 import threading
 import logging
-from flask import Flask, request, render_template, send_from_directory, jsonify
-from yt_dlp import YoutubeDL
 import base64
 
+from flask import Flask, request, render_template, send_from_directory, jsonify
+from yt_dlp import YoutubeDL
+
 # ───────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION & SETUP
+# CONFIGURATION & COOKIE DECODE
 # ───────────────────────────────────────────────────────────────────────────────
 
-# Decode Base64-encoded YouTube cookies (store in Render’s YT_COOKIES_B64)
+# If you’ve set YT_COOKIES_B64 in Render’s env, decode it here:
 COOKIE_FILE = None
 b64 = os.environ.get('YT_COOKIES_B64')
 if b64:
     COOKIE_FILE = '/tmp/youtube_cookies.txt'
+    decoded = base64.b64decode(b64)
     with open(COOKIE_FILE, 'wb') as f:
-        f.write(base64.b64decode(b64))
+        f.write(decoded)
+    # Optional: log to verify size
+    logging.info(f"Wrote {len(decoded)} bytes of cookies to {COOKIE_FILE}")
+
+# ───────────────────────────────────────────────────────────────────────────────
+# APP SETUP
+# ───────────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Where to save on the user’s machine
 DOWNLOAD_BASE = os.path.expanduser("~/Downloads")
-
-# Simple YouTube URL validation
 YOUTUBE_REGEX = re.compile(
     r'^(https?://)?(www\.)?'
     r'(youtube\.com/watch\?v=|youtu\.be/)'
     r'[\w\-]{11}(&.*)?$'
 )
-
-# In-memory task store
 tasks = {}
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -46,18 +49,16 @@ def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
 def get_download_folder(video_title):
-    safe = sanitize_filename(video_title)
-    path = os.path.join(DOWNLOAD_BASE, safe)
-    os.makedirs(path, exist_ok=True)
-    return path
+    folder = os.path.join(DOWNLOAD_BASE, sanitize_filename(video_title))
+    os.makedirs(folder, exist_ok=True)
+    return folder
 
-def get_folder_size(folder_path):
+def get_folder_size_mb(path):
     total = 0
-    for f in os.listdir(folder_path):
-        p = os.path.join(folder_path, f)
-        if os.path.isfile(p):
-            total += os.path.getsize(p)
-    # return in MB
+    for fname in os.listdir(path):
+        fp = os.path.join(path, fname)
+        if os.path.isfile(fp):
+            total += os.path.getsize(fp)
     return total / (1024 * 1024)
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -65,45 +66,25 @@ def get_folder_size(folder_path):
 # ───────────────────────────────────────────────────────────────────────────────
 
 def background_task(task_id, youtube_url):
-    start = time.time()
+    start_time = time.time()
     try:
         # 1) Fetch metadata
         info_opts = {'quiet': True}
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
         with YoutubeDL(info_opts) as ydl:
-            meta = ydl.extract_info(youtube_url, download=False)
+            info = ydl.extract_info(youtube_url, download=False)
 
-        title = meta.get('title', 'YouTube_Audio')
-        chapters = meta.get('chapters', [])
-        tasks[task_id].update(percent=5, status='fetched')
+        title    = info.get('title', 'video')
+        chapters = info.get('chapters', [])
+        tasks[task_id].update(status='fetched', percent=5)
 
-        # Prepare folder
+        # 2) Download full audio
         folder = get_download_folder(title)
-
-        # ────────────── NEW: Retry & delay deletion on Windows ──────────────
-        # Windows sometimes holds an MP3 open even after the player closes.
-        # We'll try up to 5 times (1sec apart) before giving up and continuing.
-        if os.path.exists(folder):
-            for attempt in range(5):
-                try:
-                    shutil.rmtree(folder)
-                    break
-                except OSError as e:
-                    app.logger.info(f"[{task_id}] Delete attempt {attempt+1}/5 failed: {e}")
-                    time.sleep(1)
-            else:
-                app.logger.warning(f"[{task_id}] Could not fully delete {folder}, proceeding anyway")
-        os.makedirs(folder, exist_ok=True)
-        # ───────────────────────────────────────────────────────────────────────
-
-        # 2) Download + convert to MP3 (5→50%)
         def dl_hook(d):
-            if d['status'] == 'downloading' and d.get('total_bytes'):
-                tasks[task_id].update(
-                    percent=d['downloaded_bytes'] / d['total_bytes'] * 45 + 5,
-                    status='downloading'
-                )
+            if d['status']=='downloading' and d.get('total_bytes'):
+                pct = d['downloaded_bytes']/d['total_bytes']*45 + 5
+                tasks[task_id].update(status='downloading', percent=pct)
 
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -121,67 +102,60 @@ def background_task(task_id, youtube_url):
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([youtube_url])
 
-        tasks[task_id].update(percent=50, status='downloaded')
+        tasks[task_id].update(status='downloaded', percent=50)
 
         # 3) Split or rename
         files = []
+        no_ch = False
         if not chapters:
-            final_name = f"{sanitize_filename(title)}.mp3"
+            # no chapters: just rename
+            no_ch = True
+            final = f"{sanitize_filename(title)}.mp3"
             os.rename(
                 os.path.join(folder, 'full_audio.mp3'),
-                os.path.join(folder, final_name)
+                os.path.join(folder, final)
             )
-            files = [final_name]
-            no_ch = True
+            files = [final]
         else:
-            no_ch = False
             total = len(chapters)
-            for i, ch in enumerate(chapters, 1):
+            for i, ch in enumerate(chapters, start=1):
                 fname = sanitize_filename(ch['title']) + '.mp3'
                 outp = os.path.join(folder, fname)
-
-                # ────────────── UPDATED: add '-y' to overwrite without prompt ──────────────
                 subprocess.run([
-                    'ffmpeg',
-                    '-y',                        # overwrite existing files
+                    'ffmpeg', '-y',
                     '-i', os.path.join(folder, 'full_audio.mp3'),
                     '-ss', str(ch['start_time']),
                     '-to', str(ch['end_time']),
                     '-c', 'copy',
                     outp
-                ], check=True, stderr=subprocess.PIPE)
-                # ────────────────────────────────────────────────────────────────────────────
-
-                tasks[task_id].update(
-                    percent=50 + (i / total) * 45,
-                    status='splitting'
-                )
+                ], check=True)
                 files.append(fname)
-
-            # remove the full audio once splits are done
+                pct = 50 + (i/total)*45
+                tasks[task_id].update(status='splitting', percent=pct)
+            # clean up
             os.remove(os.path.join(folder, 'full_audio.mp3'))
 
-        # 4) Done
-        elapsed = time.time() - start
+        # 4) Finalize
+        elapsed = time.time() - start_time
         tasks[task_id].update(
-            percent=100,
             status='done',
+            percent=100,
             result={
                 'video_title': title,
-                'path': folder,
+                'path': os.path.basename(folder),
                 'total_time': f"{elapsed:.2f}",
-                'total_space': f"{get_folder_size(folder):.2f}",
+                'total_space': f"{get_folder_size_mb(folder):.2f}",
                 'files': files,
                 'no_chapters': no_ch
             }
         )
 
     except Exception as e:
+        logging.exception("Task failed")
         tasks[task_id].update(status='error', error=str(e))
-        app.logger.error(f"[{task_id}] {e}")
 
 # ───────────────────────────────────────────────────────────────────────────────
-# FLASK ROUTES
+# ROUTES (pure JSON for front-end)
 # ───────────────────────────────────────────────────────────────────────────────
 
 @app.route('/start', methods=['POST'])
@@ -190,6 +164,7 @@ def start():
     url = data.get('youtube_url','').strip()
     if not YOUTUBE_REGEX.match(url):
         return jsonify(error="Invalid YouTube URL."), 400
+
     tid = str(uuid.uuid4())
     tasks[tid] = {'status':'queued','percent':0}
     threading.Thread(target=background_task, args=(tid, url), daemon=True).start()
@@ -208,24 +183,25 @@ def progress(task_id):
 
 @app.route('/result/<task_id>', methods=['GET'])
 def result(task_id):
+    """Always return JSON so front-end fetchResult() can parse d.result."""
     t = tasks.get(task_id)
     if not t:
         return jsonify(error="Invalid task ID"), 404
     if t['status'] != 'done':
         return jsonify(error="Task not complete"), 400
-    return jsonify(result=t.get('result')), 200
+    return jsonify(result=t.get('result')), 200  # ← pure JSON! :contentReference[oaicite:2]{index=2}:contentReference[oaicite:3]{index=3}
 
-@app.route("/download/<path:filepath>")
-def download_file(filepath):
-    directory, filename = os.path.split(filepath)
-    return send_from_directory(directory, filename, as_attachment=True)
+@app.route('/download/<directory>/<filename>', methods=['GET'])
+def download_file(directory, filename):
+    dirpath = os.path.join(DOWNLOAD_BASE, directory)
+    return send_from_directory(dirpath, filename, as_attachment=True)
 
-@app.route("/", methods=["GET"])
+@app.route('/', methods=['GET'])
 def index():
-    return render_template("index.html")
+    return render_template('index.html')
 
 # ───────────────────────────────────────────────────────────────────────────────
-# RUN
+# MAIN
 # ───────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
