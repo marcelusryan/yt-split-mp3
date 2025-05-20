@@ -1,5 +1,4 @@
 import os
-import shutil
 import subprocess
 import re
 import time
@@ -12,8 +11,10 @@ from flask import Flask, request, render_template, send_from_directory, jsonify
 from yt_dlp import YoutubeDL
 
 # ───────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION & COOKIE DECODE
+# GLOBAL CONFIG & COOKIE DECODE
 # ───────────────────────────────────────────────────────────────────────────────
+
+logging.basicConfig(level=logging.INFO)
 
 # If you’ve set YT_COOKIES_B64 in Render’s env, decode it here:
 COOKIE_FILE = None
@@ -23,16 +24,24 @@ if b64:
     decoded = base64.b64decode(b64)
     with open(COOKIE_FILE, 'wb') as f:
         f.write(decoded)
-    # Optional: log to verify size
-    logging.info(f"Wrote {len(decoded)} bytes of cookies to {COOKIE_FILE}")
+    logging.info(f"Wrote cookie file ({len(decoded)} bytes) to {COOKIE_FILE}")
+    head = open(COOKIE_FILE, 'r', errors='ignore').read().splitlines()[:5]
+    logging.info("Cookie file head:\n" + "\n".join(head))
+
+# Common headers to mimic a real browser
+COMMON_HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/114.0.0.0 Safari/537.36'
+    )
+}
 
 # ───────────────────────────────────────────────────────────────────────────────
-# APP SETUP
+# FLASK APP SETUP
 # ───────────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
-
 DOWNLOAD_BASE = os.path.expanduser("~/Downloads")
 YOUTUBE_REGEX = re.compile(
     r'^(https?://)?(www\.)?'
@@ -69,21 +78,28 @@ def background_task(task_id, youtube_url):
     start_time = time.time()
     try:
         # 1) Fetch metadata
-        info_opts = {'quiet': True}
+        info_opts = {
+            'quiet': True,
+            'geo_bypass': True,
+            'nocheckcertificate': True,
+            'http_headers': COMMON_HEADERS
+        }
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
+
         with YoutubeDL(info_opts) as ydl:
             info = ydl.extract_info(youtube_url, download=False)
 
-        title    = info.get('title', 'video')
+        title = info.get('title', 'video')
         chapters = info.get('chapters', [])
         tasks[task_id].update(status='fetched', percent=5)
 
         # 2) Download full audio
         folder = get_download_folder(title)
+
         def dl_hook(d):
-            if d['status']=='downloading' and d.get('total_bytes'):
-                pct = d['downloaded_bytes']/d['total_bytes']*45 + 5
+            if d['status'] == 'downloading' and d.get('total_bytes'):
+                pct = d['downloaded_bytes'] / d['total_bytes'] * 45 + 5
                 tasks[task_id].update(status='downloading', percent=pct)
 
         ydl_opts = {
@@ -95,6 +111,9 @@ def background_task(task_id, youtube_url):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
+            'geo_bypass': True,
+            'nocheckcertificate': True,
+            'http_headers': COMMON_HEADERS
         }
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE
@@ -104,12 +123,9 @@ def background_task(task_id, youtube_url):
 
         tasks[task_id].update(status='downloaded', percent=50)
 
-        # 3) Split or rename
+        # 3) Split into chapters (or rename if none)
         files = []
-        no_ch = False
         if not chapters:
-            # no chapters: just rename
-            no_ch = True
             final = f"{sanitize_filename(title)}.mp3"
             os.rename(
                 os.path.join(folder, 'full_audio.mp3'),
@@ -130,9 +146,8 @@ def background_task(task_id, youtube_url):
                     outp
                 ], check=True)
                 files.append(fname)
-                pct = 50 + (i/total)*45
+                pct = 50 + (i / total) * 45
                 tasks[task_id].update(status='splitting', percent=pct)
-            # clean up
             os.remove(os.path.join(folder, 'full_audio.mp3'))
 
         # 4) Finalize
@@ -145,8 +160,7 @@ def background_task(task_id, youtube_url):
                 'path': os.path.basename(folder),
                 'total_time': f"{elapsed:.2f}",
                 'total_space': f"{get_folder_size_mb(folder):.2f}",
-                'files': files,
-                'no_chapters': no_ch
+                'files': files
             }
         )
 
@@ -155,18 +169,17 @@ def background_task(task_id, youtube_url):
         tasks[task_id].update(status='error', error=str(e))
 
 # ───────────────────────────────────────────────────────────────────────────────
-# ROUTES (pure JSON for front-end)
+# ROUTES
 # ───────────────────────────────────────────────────────────────────────────────
 
 @app.route('/start', methods=['POST'])
 def start():
     data = request.get_json(force=True)
-    url = data.get('youtube_url','').strip()
+    url = data.get('youtube_url', '').strip()
     if not YOUTUBE_REGEX.match(url):
         return jsonify(error="Invalid YouTube URL."), 400
-
     tid = str(uuid.uuid4())
-    tasks[tid] = {'status':'queued','percent':0}
+    tasks[tid] = {'status': 'queued', 'percent': 0}
     threading.Thread(target=background_task, args=(tid, url), daemon=True).start()
     return jsonify(task_id=tid), 202
 
@@ -175,21 +188,20 @@ def progress(task_id):
     t = tasks.get(task_id)
     if not t:
         return jsonify(error="Invalid task ID"), 404
-    if t['status']=='error':
+    if t['status'] == 'error':
         return jsonify(status='error', error=t.get('error')), 200
-    if t['status']=='done':
+    if t['status'] == 'done':
         return jsonify(status='done'), 200
     return jsonify(status=t['status'], percent=t['percent']), 202
 
 @app.route('/result/<task_id>', methods=['GET'])
 def result(task_id):
-    """Always return JSON so front-end fetchResult() can parse d.result."""
     t = tasks.get(task_id)
     if not t:
         return jsonify(error="Invalid task ID"), 404
     if t['status'] != 'done':
         return jsonify(error="Task not complete"), 400
-    return jsonify(result=t.get('result')), 200  # ← pure JSON! :contentReference[oaicite:2]{index=2}:contentReference[oaicite:3]{index=3}
+    return jsonify(result=t.get('result')), 200
 
 @app.route('/download/<directory>/<filename>', methods=['GET'])
 def download_file(directory, filename):
