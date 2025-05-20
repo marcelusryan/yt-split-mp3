@@ -27,12 +27,18 @@ if b64:
     head = open(COOKIE_FILE, 'r', errors='ignore').read().splitlines()[:5]
     logging.info("Cookie file head:\n" + "\n".join(head))
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Tweak these headers to look exactly like a real YouTube watch-page request
+# ───────────────────────────────────────────────────────────────────────────────
+
 COMMON_HEADERS = {
     'User-Agent': (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
         'AppleWebKit/537.36 (KHTML, like Gecko) '
         'Chrome/114.0.0.0 Safari/537.36'
-    )
+    ),
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.youtube.com'
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
