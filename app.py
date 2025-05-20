@@ -16,7 +16,6 @@ from yt_dlp import YoutubeDL
 
 logging.basicConfig(level=logging.INFO)
 
-# If you’ve set YT_COOKIES_B64 in Render’s env, decode it here:
 COOKIE_FILE = None
 b64 = os.environ.get('YT_COOKIES_B64')
 if b64:
@@ -28,7 +27,6 @@ if b64:
     head = open(COOKIE_FILE, 'r', errors='ignore').read().splitlines()[:5]
     logging.info("Cookie file head:\n" + "\n".join(head))
 
-# Common headers to mimic a real browser
 COMMON_HEADERS = {
     'User-Agent': (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -87,6 +85,9 @@ def background_task(task_id, youtube_url):
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
 
+        # Debug: log yt-dlp info options before metadata fetch
+        logging.info(f"INFO_OPTS -> {info_opts!r}, COOKIE_FILE={COOKIE_FILE}")
+
         with YoutubeDL(info_opts) as ydl:
             info = ydl.extract_info(youtube_url, download=False)
 
@@ -117,6 +118,9 @@ def background_task(task_id, youtube_url):
         }
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE
+
+        # Debug: log yt-dlp download options before audio download
+        logging.info(f"YDL_OPTS  -> {ydl_opts!r}")
 
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([youtube_url])
