@@ -1,3 +1,5 @@
+# app.py
+
 import os
 import subprocess
 import re
@@ -6,33 +8,29 @@ import uuid
 import threading
 import logging
 import base64
+import io
+import zipfile
 
-from flask import Flask, request, render_template, send_from_directory, jsonify
+from flask import (
+    Flask,
+    request,
+    render_template,
+    send_from_directory,
+    send_file,
+    jsonify,
+    abort
+)
 from yt_dlp import YoutubeDL
 
 # ───────────────────────────────────────────────────────────────────────────────
-# GLOBAL CONFIG & COOKIE DECODE
+# APP INITIALIZATION & LOGGING
 # ───────────────────────────────────────────────────────────────────────────────
-
+app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-COOKIE_FILE = None
-b64 = os.environ.get('YT_COOKIES_B64')
-if b64:
-    COOKIE_FILE = '/tmp/youtube_cookies.txt'
-    decoded = base64.b64decode(b64)
-    with open(COOKIE_FILE, 'wb') as f:
-        f.write(decoded)
-    logging.info(f"Wrote cookie file ({len(decoded)} bytes) to {COOKIE_FILE}")
-    # — log every line so you can verify all cookies are present —
-    lines = open(COOKIE_FILE, 'r', errors='ignore').read().splitlines()
-    logging.info(f"Cookie file has {len(lines)} lines; full contents:\n" +
-                 "\n".join(lines))
-
 # ───────────────────────────────────────────────────────────────────────────────
-# Tweak these headers to look exactly like a real YouTube watch-page request
+# COMMON HEADERS & COOKIE DECODE
 # ───────────────────────────────────────────────────────────────────────────────
-
 COMMON_HEADERS = {
     'User-Agent': (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -43,42 +41,47 @@ COMMON_HEADERS = {
     'Referer': 'https://www.youtube.com'
 }
 
-# ───────────────────────────────────────────────────────────────────────────────
-# FLASK APP SETUP
-# ───────────────────────────────────────────────────────────────────────────────
+COOKIE_FILE = None
+b64 = os.environ.get('YT_COOKIES_B64')
+if b64:
+    COOKIE_FILE = '/tmp/youtube_cookies.txt'
+    decoded = base64.b64decode(b64)
+    with open(COOKIE_FILE, 'wb') as f:
+        f.write(decoded)
+    logging.info(f"Wrote cookie file ({len(decoded)} bytes) to {COOKIE_FILE}")
 
-app = Flask(__name__)
-DOWNLOAD_BASE = os.path.expanduser("~/Downloads")
+# ───────────────────────────────────────────────────────────────────────────────
+# CONSTANTS & HELPERS
+# ───────────────────────────────────────────────────────────────────────────────
 YOUTUBE_REGEX = re.compile(
     r'^(https?://)?(www\.)?'
     r'(youtube\.com/watch\?v=|youtu\.be/)'
-    r'[\w\-]{11}(&.*)?$'
+    r'[\w-]{11}'
 )
-tasks = {}
 
-# ───────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ───────────────────────────────────────────────────────────────────────────────
+# Now store everything under a local `/downloads` folder in your app dir
+DOWNLOAD_BASE = os.path.join(os.getcwd(), "downloads")
+os.makedirs(DOWNLOAD_BASE, exist_ok=True)
 
-def sanitize_filename(name):
-    return re.sub(r'[\\/*?:"<>|]', "", name).strip()
+def sanitize_filename(name: str) -> str:
+    return re.sub(r'[\\/*?:"<>|]', "_", name)
 
-def get_download_folder(video_title):
-    folder = os.path.join(DOWNLOAD_BASE, sanitize_filename(video_title))
+def get_download_folder(title: str) -> str:
+    folder = os.path.join(DOWNLOAD_BASE, sanitize_filename(title))
     os.makedirs(folder, exist_ok=True)
     return folder
 
-def get_folder_size_mb(path):
+def get_folder_size_mb(path: str) -> float:
     total = 0
-    for fname in os.listdir(path):
-        fp = os.path.join(path, fname)
-        if os.path.isfile(fp):
-            total += os.path.getsize(fp)
+    for root, _, files in os.walk(path):
+        for f in files:
+            total += os.path.getsize(os.path.join(root, f))
     return total / (1024 * 1024)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# BACKGROUND WORKER
+# BACKGROUND TASK MANAGEMENT
 # ───────────────────────────────────────────────────────────────────────────────
+tasks = {}
 
 def background_task(task_id, youtube_url):
     start_time = time.time()
@@ -93,15 +96,10 @@ def background_task(task_id, youtube_url):
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
 
-        # Debug: log yt-dlp info options before metadata fetch
-        logging.info(f"INFO_OPTS -> {info_opts!r}, COOKIE_FILE={COOKIE_FILE}")
-
         with YoutubeDL(info_opts) as ydl:
             info = ydl.extract_info(youtube_url, download=False)
-
-        title = info.get('title', 'video')
-        chapters = info.get('chapters', [])
-        tasks[task_id].update(status='fetched', percent=5)
+        title = info.get('title', youtube_url)
+        chapters = info.get('chapters') or []
 
         # 2) Download full audio
         folder = get_download_folder(title)
@@ -127,15 +125,11 @@ def background_task(task_id, youtube_url):
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE
 
-        # Debug: log yt-dlp download options before audio download
-        logging.info(f"YDL_OPTS  -> {ydl_opts!r}")
-
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([youtube_url])
-
         tasks[task_id].update(status='downloaded', percent=50)
 
-        # 3) Split into chapters (or rename if none)
+        # 3) Split into chapters (or rename single file)
         files = []
         if not chapters:
             final = f"{sanitize_filename(title)}.mp3"
@@ -183,7 +177,6 @@ def background_task(task_id, youtube_url):
 # ───────────────────────────────────────────────────────────────────────────────
 # ROUTES
 # ───────────────────────────────────────────────────────────────────────────────
-
 @app.route('/start', methods=['POST'])
 def start():
     data = request.get_json(force=True)
@@ -204,9 +197,9 @@ def progress(task_id):
         return jsonify(status='error', error=t.get('error')), 200
     if t['status'] == 'done':
         return jsonify(status='done'), 200
-    return jsonify(status=t['status'], percent=t['percent']), 202
+    return jsonify(status=t['status'], percent=t['percent']), 200
 
-@app.route('/result/<task_id>', methods=['GET'])
+@app.route('/result/<task_id>')
 def result(task_id):
     t = tasks.get(task_id)
     if not t:
@@ -214,6 +207,23 @@ def result(task_id):
     if t['status'] != 'done':
         return jsonify(error="Task not complete"), 400
     return jsonify(result=t.get('result')), 200
+
+@app.route('/download/zip/<directory>', methods=['GET'])
+def download_zip(directory):
+    dirpath = os.path.join(DOWNLOAD_BASE, directory)
+    if not os.path.isdir(dirpath):
+        abort(404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for fname in os.listdir(dirpath):
+            zf.write(os.path.join(dirpath, fname), arcname=fname)
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=f"{directory}.zip"
+    )
 
 @app.route('/download/<directory>/<filename>', methods=['GET'])
 def download_file(directory, filename):
@@ -224,11 +234,5 @@ def download_file(directory, filename):
 def index():
     return render_template('index.html')
 
-# ───────────────────────────────────────────────────────────────────────────────
-# MAIN
-# ───────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    import webbrowser
-    webbrowser.open("http://127.0.0.1:5000")
     app.run(debug=True)
