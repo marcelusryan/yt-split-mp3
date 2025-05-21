@@ -21,6 +21,7 @@ from flask import (
     abort
 )
 from yt_dlp import YoutubeDL
+from yt_dlp.version import __version__ as ytdlp_version
 
 # ───────────────────────────────────────────────────────────────────────────────
 # APP INITIALIZATION & LOGGING
@@ -87,6 +88,9 @@ def get_folder_size_mb(path: str) -> float:
 tasks = {}
 
 def background_task(task_id, youtube_url):
+    app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
+    app.logger.info(f"▶ cookies length: {len(os.environ.get('YT_COOKIES_B64',''))}")
+    
     start_time = time.time()
     try:
         # 1) Fetch metadata

@@ -9,17 +9,19 @@ RUN apt-get update && \
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and upgrade pip + yt-dlp before installing other deps
+# Copy requirements, install them, then upgrade yt-dlp and show its version in the build log
 COPY requirements.txt .
-RUN pip install --upgrade pip yt-dlp \
- && pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir --upgrade yt-dlp \
+ && pip show yt-dlp
 
-# Copy application code
+# Copy your application code
 COPY . .
 
-# Let Render inject $PORT; document and expose it
+# Expose and use Render's PORT env var
 ENV PORT 5000
 EXPOSE 5000
 
-# Use shell form so that $PORT is expanded at runtime
+# Launch the app via Gunicorn, expanding $PORT at runtime
 CMD sh -c "gunicorn --bind 0.0.0.0:${PORT} app:app"
