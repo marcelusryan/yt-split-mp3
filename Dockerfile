@@ -13,7 +13,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir --upgrade yt-dlp \
+ && pip install --no-cache-dir git+https://github.com/yt-dlp/yt-dlp.git@master \
  && pip show yt-dlp
 
 # Copy your application code
