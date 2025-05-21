@@ -8,93 +8,153 @@
 </head>
 <body class="p-4">
   <h2>YouTube Audio Chapter Splitter</h2>
+
+  <div class="alert alert-info">
+    <p>
+      This tool lets you enter any public YouTube URL, downloads its audio track, automatically splits it into its chapters (if available), and packages the results so you can download a ZIP archive or grab each MP3 file individually.
+    </p>
+  </div>
+
+  <div class="alert alert-warning">
+    <p><strong>Disclaimer:</strong> This is a third‐party program and is not affiliated with or endorsed by YouTube.</p>
+  </div>
+
   <div class="mb-3">
     <input id="url" class="form-control" placeholder="Enter YouTube URL" />
   </div>
-  <button id="btn" class="btn btn-primary">Download & Split</button>
-  <div id="prog" class="progress mt-3" style="display:none; height: 25px;">
-    <div id="bar" class="progress-bar" role="progressbar" style="width: 0%;">0%</div>
+  <!-- 1. force plain button so it never submits a form -->
+  <button id="btn" type="button" class="btn btn-primary">Download &amp; Split</button>
+
+  <p id="timer" class="mt-3 fw-bold" style="display: none;">Time: 00:00</p>
+
+  <div id="prog" class="progress mt-2" style="display:none; height: 25px;">
+    <div id="bar" class="progress-bar" role="progressbar" style="width: 0%;">0% - Waiting</div>
   </div>
   <div id="msg" class="mt-3"></div>
 
   <script>
-    const btn = document.getElementById('btn'),
-          prog = document.getElementById('prog'),
-          bar = document.getElementById('bar'),
-          msg = document.getElementById('msg');
+    const btn   = document.getElementById('btn'),
+          prog  = document.getElementById('prog'),
+          bar   = document.getElementById('bar'),
+          msg   = document.getElementById('msg'),
+          timer = document.getElementById('timer');
 
-    btn.addEventListener('click', async () => {
-      msg.innerHTML = '';
-      prog.style.display = 'block';
-      bar.style.width = '0%';
-      bar.innerText = '0%';
-      btn.disabled = true;
-      btn.innerText = 'Working...';
+    let startTime, timerInterval;
 
-      const url = document.getElementById('url').value.trim();
-      const res = await fetch('/start', {
-        method: 'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ youtube_url: url })
-      });
-      if (!res.ok) return showError((await res.json()).error);
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();                 // prevent any default form action
+      try {
+        // reset UI
+        msg.innerHTML = '';
+        bar.style.width = '0%';
+        bar.innerText  = '0% - Waiting';
+        prog.style.display = 'block';
+        btn.disabled = true;
+        btn.innerText = 'Working…';
 
-      const { task_id } = await res.json();
-      (function poll() {
-        fetch(`/progress/${task_id}`)
-          .then(r => r.json())
-          .then(d => {
-            if (d.error) return showError(d.error);
-            if (d.status === 'done') {
-              bar.style.width = '100%'; bar.innerText = '100%';
-              fetchResult(task_id);
-            } else if (d.status === 'error') {
-              showError(d.error || 'An error occurred');
-            } else {
-              setTimeout(poll, 800);
-            }
-          });
-      })();
+        // start timer
+        startTime = Date.now();
+        timer.style.display = 'block';
+        updateTimer();
+        timerInterval = setInterval(updateTimer, 1000);
+
+        // fire off the task
+        const url = document.getElementById('url').value.trim();
+        const res = await fetch('/start', {
+          method: 'POST',
+          headers: { 'Content-Type':'application/json' },
+          body: JSON.stringify({ youtube_url: url })
+        });
+        if (!res.ok) {
+          const err = (await res.json()).error || 'Invalid response';
+          return showError(err);
+        }
+
+        const { task_id } = await res.json();
+        pollProgress(task_id);
+
+      } catch (err) {
+        console.error(err);
+        showError('Could not start task: ' + err.message);
+      }
     });
 
+    function pollProgress(id) {
+      fetch(`/progress/${id}`)
+        .then(r => r.json())
+        .then(d => {
+          if (d.error) return showError(d.error);
+          if (d.status === 'done') {
+            bar.style.width = '100%';
+            bar.innerText  = '100% - Complete';
+            clearInterval(timerInterval);
+            fetchResult(id);
+          } else if (d.status === 'error') {
+            clearInterval(timerInterval);
+            showError(d.error || 'An error occurred');
+          } else {
+            const pct   = d.percent !== undefined ? Math.floor(d.percent) : 0;
+            const label = d.status === 'downloading'
+                          ? 'Downloading audio'
+                          : d.status === 'splitting'
+                            ? 'Splitting chapters'
+                            : d.status;
+            bar.style.width = pct + '%';
+            bar.innerText  = `${pct}% - ${label}`;
+            setTimeout(() => pollProgress(id), 800);
+          }
+        })
+        .catch(err => {
+          clearInterval(timerInterval);
+          showError('Progress check failed');
+          console.error(err);
+        });
+    }
+
+    function updateTimer() {
+      const elapsedMs = Date.now() - startTime;
+      const totalSec  = Math.floor(elapsedMs / 1000);
+      const mm = String(Math.floor(totalSec / 60)).padStart(2, '0');
+      const ss = String(totalSec % 60).padStart(2, '0');
+      timer.innerText = `Time: ${mm}:${ss}`;
+    }
+
     async function fetchResult(id) {
-      let r = await fetch(`/result/${id}`),
-          d = await r.json();
-      if (d.error) return showError(d.error);
+      try {
+        const r = await fetch(`/result/${id}`);
+        const d = await r.json();
+        if (d.error) return showError(d.error);
 
-      const rlt = d.result;
-      // Build UI with both ZIP link and individual-file list
-      const listItems = rlt.files
-        .map(f => `
-          <li>
-            <a href="/download/${encodeURIComponent(rlt.path)}/${encodeURIComponent(f)}" download>
-              ${f}
-            </a>
-          </li>
-        `).join('');
+        const rlt = d.result;
+        const listItems = rlt.files
+          .map(f => `<li><a href="/download/${encodeURIComponent(rlt.path)}/${encodeURIComponent(f)}" download>${f}</a></li>`)
+          .join('');
 
-      msg.innerHTML = `
-        <div class="alert alert-success">
-          <h5>✅ Download complete!</h5>
-          <p><strong>Video:</strong> ${rlt.video_title}</p>
-          <p><strong>Download ZIP:</strong>
-            <a href="/download/zip/${encodeURIComponent(rlt.path)}" download>
-              ${rlt.video_title}.zip
-            </a>
-          </p>
-          <p><strong>Individual Files:</strong></p>
-          <ul>
-            ${listItems}
-          </ul>
-          <p><strong>Time:</strong> ${rlt.total_time} s</p>
-          <p><strong>Space:</strong> ${rlt.total_space} MB</p>
-        </div>`;
-      btn.disabled = false;
-      btn.innerText = 'Download & Split';
+        msg.innerHTML = `
+          <div class="alert alert-success">
+            <h5>✅ Download complete!</h5>
+            <p><strong>Video:</strong> ${rlt.video_title}</p>
+            <p><strong>Download ZIP:</strong>
+              <a href="/download/zip/${encodeURIComponent(rlt.path)}" download>${rlt.video_title}.zip</a>
+            </p>
+            <p><strong>Individual Files:</strong></p>
+            <ul>${listItems}</ul>
+            <p><strong>Total Space:</strong> ${rlt.total_space} MB</p>
+          </div>`;
+      } catch (err) {
+        showError('Failed to fetch results');
+        console.error(err);
+      } finally {
+        clearInterval(timerInterval);
+        btn.disabled = false;
+        btn.innerText = 'Download & Split';
+      }
     }
 
     function showError(txt) {
       prog.style.display = 'none';
+      timer.style.display = 'none';
+      clearInterval(timerInterval);
       msg.innerHTML = `<div class="alert alert-danger">❌ ${txt}</div>`;
       btn.disabled = false;
       btn.innerText = 'Download & Split';
