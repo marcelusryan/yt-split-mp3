@@ -1,23 +1,18 @@
 FROM python:3.9-slim
 ENV PYTHONUNBUFFERED=1
 
-# install git & ffmpeg
+# Install git (for pip+git) and ffmpeg
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ffmpeg \
-  && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends git ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# install everything except yt-dlp
+# Install Python deps (yt-dlp will come from GitHub master)
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
-# uninstall any existing yt-dlp, then pull master
-RUN pip uninstall -y yt-dlp \
-  && pip install --no-cache-dir --root-user-action=ignore \
-      --upgrade --force-reinstall \
-      git+https://github.com/yt-dlp/yt-dlp.git@master
-
+# Copy app source
 COPY . .
 
 EXPOSE 5000

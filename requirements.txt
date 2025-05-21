@@ -2,3 +2,4 @@ Flask
 pytube
 moviepy
 gunicorn
+git+https://github.com/yt-dlp/yt-dlp.git@master#egg=yt-dlp
