@@ -49,6 +49,9 @@ if b64:
     with open(COOKIE_FILE, 'wb') as f:
         f.write(decoded)
     logging.info(f"Wrote cookie file ({len(decoded)} bytes) to {COOKIE_FILE}")
+    # — log every line so you can verify all cookies are present —
+    lines = open(COOKIE_FILE, 'r', errors='ignore').read().splitlines()
+    logging.info(f"Cookie file has {len(lines)} lines; full contents:\n" + "\n".join(lines))
 
 # ───────────────────────────────────────────────────────────────────────────────
 # CONSTANTS & HELPERS
@@ -110,7 +113,8 @@ def background_task(task_id, youtube_url):
                 tasks[task_id].update(status='downloading', percent=pct)
 
         ydl_opts = {
-            'format': 'bestaudio/best',
+            # try m4a → webm → best
+            'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
             'progress_hooks': [dl_hook],
             'outtmpl': os.path.join(folder, 'full_audio.%(ext)s'),
             'postprocessors': [{
