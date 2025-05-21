@@ -1,27 +1,34 @@
-# Use a minimal Python base image
+# ─────────────────────────────────────────────────────────────────────────────
+# Use the official Python 3.9 slim image
 FROM python:3.9-slim
 
-# Install ffmpeg system dependency
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
+# Prevent Python from buffering stdout/stderr (so logs appear in real time)
+ENV PYTHONUNBUFFERED=1
 
-# Set working directory
+# Install system dependencies (git for pip+git, ffmpeg for audio processing)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         git \
+         ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set your working directory
 WORKDIR /app
 
-# Copy requirements, install them, then upgrade yt-dlp and show its version in the build log
-COPY requirements.txt .
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir git+https://github.com/yt-dlp/yt-dlp.git@master \
- && pip show yt-dlp
+# Copy and install your standard Python dependencies
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
-# Copy your application code
+# Override PyPI yt-dlp with the bleeding‐edge GitHub version (fixes SABR/HLS)
+RUN pip install --no-cache-dir --root-user-action=ignore \
+      git+https://github.com/yt-dlp/yt-dlp.git@master
+
+# Copy in the rest of your app
 COPY . .
 
-# Expose and use Render's PORT env var
-ENV PORT 5000
+# Expose whatever port your Flask/Gunicorn uses (e.g. 5000)
 EXPOSE 5000
 
-# Launch the app via Gunicorn, expanding $PORT at runtime
-CMD sh -c "gunicorn --bind 0.0.0.0:${PORT} app:app"
+# Launch your app; swap to gunicorn or flask run if that’s what you use
+CMD ["python", "app.py"]
+# ─────────────────────────────────────────────────────────────────────────────
