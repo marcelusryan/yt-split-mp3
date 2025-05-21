@@ -21,5 +21,5 @@ COPY . .
 ENV PORT 5000
 EXPOSE 5000
 
-# Launch the app via Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:$PORT", "app:app"]
+# Use shell form so that $PORT is expanded at runtime
+CMD sh -c "gunicorn --bind 0.0.0.0:${PORT} app:app"
