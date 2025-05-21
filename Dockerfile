@@ -30,5 +30,5 @@ COPY . .
 EXPOSE 5000
 
 # Launch your app; swap to gunicorn or flask run if that’s what you use
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
 # ─────────────────────────────────────────────────────────────────────────────
