@@ -102,19 +102,17 @@ def get_folder_size_mb(path: str) -> float:
 tasks = {}
 
 def background_task(task_id, youtube_url):
-    # Refresh cookies (if you’ve configured COOKIE_FILE)
+    # ─── Log version & cookie length ───────────────────────────────────────
+    app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
+    app.logger.info(f"▶ cookies length: {len(os.environ.get('YT_COOKIES_B64',''))}")
+    
+    # ─── 0) Refresh guest cookies ONCE at the very top ────────────────────
     if COOKIE_FILE:
         refresh_cookies()
 
-    app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
-    app.logger.info(f"▶ cookies length: {len(os.environ.get('YT_COOKIES_B64',''))}")
-
     start_time = time.time()
     try:
-        # ───────────────────────────────────────────────────────────────────────
-        # COOKIE & INNERTUBE VISITOR TOKEN
-        # ───────────────────────────────────────────────────────────────────────
-        # Load cookies into a jar so we can extract the VISITOR_INFO1_LIVE token
+        # ─── COOKIE & INNERTUBE VISITOR TOKEN (unchanged) ────────────────────
         extractor_args = ['player_skip=webpage,configs']
         if COOKIE_FILE:
             jar = MozillaCookieJar()
@@ -128,39 +126,36 @@ def background_task(task_id, youtube_url):
             if vis:
                 visitor_data = vis.value
                 extractor_args.append(f'visitor_data={visitor_data}')
-                app.logger.info("Using visitor_data from cookies for Innertube API")
+                app.logger.info("Using visitor_data from cookies for Innertube API")  # :contentReference[oaicite:0]{index=0}
 
-        # ───────────────────────────────────────────────────────────────────────
-        # 1) Fetch metadata (with curl-impersonate + skip HTML & TV config)
-        # ───────────────────────────────────────────────────────────────────────
+        # ─── 1) Fetch metadata ───────────────────────────────────────────────
         info_opts = {
-            'quiet':            True,
-            'geo_bypass':       True,
-            'nocheckcertificate': True,
-            'http_headers':     COMMON_HEADERS,
-            'downloader':       'curl_cffi',              # use curl-impersonate for real TLS fingerprint
-            'extractor_args':   {'youtube': extractor_args},
-            'listformats':      True                      # show formats in logs for debugging
+            'quiet':             True,
+            'geo_bypass':        True,
+            'nocheckcertificate':True,
+            'http_headers':      COMMON_HEADERS,
+            'downloader':        'curl_cffi',
+            'extractor_args':    {'youtube': extractor_args},
+            'listformats':       True,
         }
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
 
-        # Try once with cookies, then fallback to anonymous if needed
+        # Try once with cookies, then true anonymous fallback
         try:
             with YoutubeDL(info_opts) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
         except Exception:
-            logging.warning("Metadata fetch with cookies failed, retrying without cookies")
-            info_opts.pop('cookiefile', None)
-            with YoutubeDL(info_opts) as ydl:
+            logging.warning("Metadata with cookies failed – retrying anonymously")
+            anon_info_opts = {k: v for k, v in info_opts.items() if k != 'cookiefile'}
+            anon_info_opts['nocookies'] = True
+            with YoutubeDL(anon_info_opts) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
 
-        title = info.get('title', youtube_url)
+        title    = info.get('title', youtube_url)
         chapters = info.get('chapters') or []
 
-        # ───────────────────────────────────────────────────────────────────────
-        # 2) Download full audio (same curl-impersonate + skip config)
-        # ───────────────────────────────────────────────────────────────────────
+        # ─── 2) Download full audio ──────────────────────────────────────────
         folder = get_download_folder(title)
 
         def dl_hook(d):
@@ -175,10 +170,10 @@ def background_task(task_id, youtube_url):
             'postprocessors':    [{
                 'key':            'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '192',
+                'preferredquality':'192',
             }],
             'geo_bypass':        True,
-            'nocheckcertificate': True,
+            'nocheckcertificate':True,
             'http_headers':      COMMON_HEADERS,
             'downloader':        'curl_cffi',
             'extractor_args':    {'youtube': extractor_args},
@@ -186,20 +181,19 @@ def background_task(task_id, youtube_url):
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE
 
+        # Try download with cookies, then anonymous fallback
         try:
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([youtube_url])
         except Exception:
-            logging.warning("Download with cookies failed, retrying without cookies")
-            ydl_opts.pop('cookiefile', None)
-            with YoutubeDL(ydl_opts) as ydl:
+            logging.warning("Download with cookies failed – retrying anonymously")
+            anon_download_opts = {k: v for k, v in ydl_opts.items() if k != 'cookiefile'}
+            anon_download_opts['nocookies'] = True
+            with YoutubeDL(anon_download_opts) as ydl:
                 ydl.download([youtube_url])
-
         tasks[task_id].update(status='downloaded', percent=50)
 
-        # ───────────────────────────────────────────────────────────────────────
-        # 3) Split into chapters (or rename single file)
-        # ───────────────────────────────────────────────────────────────────────
+        # ─── 3) Split into chapters (or rename single file) ────────────────
         files = []
         if not chapters:
             final = f"{sanitize_filename(title)}.mp3"
@@ -224,27 +218,26 @@ def background_task(task_id, youtube_url):
                 files.append(fname)
                 pct = 50 + (i / total) * 45
                 tasks[task_id].update(status='splitting', percent=pct)
-            os.remove(os.path.join(folder, 'full_audio.mp3'))
+            os.remove(os.path.join(folder, 'full_audio.mp3'))  # :contentReference[oaicite:1]{index=1}
 
-        # ───────────────────────────────────────────────────────────────────────
-        # 4) Finalize
-        # ───────────────────────────────────────────────────────────────────────
+        # ─── 4) Finalize ────────────────────────────────────────────────────
         elapsed = time.time() - start_time
         tasks[task_id].update(
             status='done',
             percent=100,
             result={
                 'video_title': title,
-                'path': os.path.basename(folder),
-                'total_time': f"{elapsed:.2f}",
+                'path':        os.path.basename(folder),
+                'total_time':  f"{elapsed:.2f}",
                 'total_space': f"{get_folder_size_mb(folder):.2f}",
-                'files': files
+                'files':       files
             }
         )
 
     except Exception as e:
         logging.exception("Task failed")
         tasks[task_id].update(status='error', error=str(e))
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # ROUTES (unchanged)
