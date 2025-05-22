@@ -98,13 +98,26 @@ def background_task(task_id, youtube_url):
             'quiet': True,
             'geo_bypass': True,
             'nocheckcertificate': True,
-            'http_headers': COMMON_HEADERS
+            'http_headers': COMMON_HEADERS,
+            'extractor_args': {
+                'youtube': {
+                    # force Android client to avoid SSAP stripping out audio/video
+                    'player_client': 'android'
+                }
+            }
         }
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
 
-        with YoutubeDL(info_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
+        info_opts['listformats'] = True #  Verify available formats with --list-formats
+        try:
+            with YoutubeDL(info_opts) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
+        except Exception:
+            # retry without cookies if the first attempt failed
+            info_opts.pop('cookiefile', None)
+            with YoutubeDL(info_opts) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
         title = info.get('title', youtube_url)
         chapters = info.get('chapters') or []
 
@@ -128,7 +141,13 @@ def background_task(task_id, youtube_url):
             }],
             'geo_bypass': True,
             'nocheckcertificate': True,
-            'http_headers': COMMON_HEADERS
+            'http_headers': COMMON_HEADERS,
+            'extractor_args': {
+                'youtube': {
+                    # force Android client to avoid SSAP stripping out audio/video
+                    'player_client': 'android'
+                }
+            }
         }
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE
