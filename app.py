@@ -8,7 +8,7 @@ import logging
 import base64
 import io
 import zipfile
-
+import requests
 from http.cookiejar import MozillaCookieJar  # for loading cookies and extracting visitor token
 from flask import (
     Flask,
@@ -64,6 +64,23 @@ YOUTUBE_REGEX = re.compile(
 DOWNLOAD_BASE = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_BASE, exist_ok=True)
 
+def refresh_cookies():
+    # remove an old cookie file if it exists
+    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
+        os.remove(COOKIE_FILE)
+
+    # start a session, hit the homepage, capture its cookies
+    session = requests.Session()
+    session.headers.update(COMMON_HEADERS)
+    session.get("https://www.youtube.com", timeout=10)
+
+    # dump into a MozillaCookieJar for yt-dlp
+    jar = MozillaCookieJar(COOKIE_FILE)
+    for c in session.cookies:
+        jar.set_cookie(c)      # copy requests’ cookies into jar
+    jar.save(ignore_discard=True, ignore_expires=True)
+    logging.info(f"Fetched fresh guest cookies ({len(session.cookies)} total) to {COOKIE_FILE}")
+
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
@@ -85,6 +102,10 @@ def get_folder_size_mb(path: str) -> float:
 tasks = {}
 
 def background_task(task_id, youtube_url):
+    # Refresh cookies (if you’ve configured COOKIE_FILE)
+    if COOKIE_FILE:
+        refresh_cookies()
+
     app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
     app.logger.info(f"▶ cookies length: {len(os.environ.get('YT_COOKIES_B64',''))}")
 
@@ -129,6 +150,7 @@ def background_task(task_id, youtube_url):
             with YoutubeDL(info_opts) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
         except Exception:
+            logging.warning("Metadata fetch with cookies failed, retrying without cookies")
             info_opts.pop('cookiefile', None)
             with YoutubeDL(info_opts) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
@@ -164,8 +186,15 @@ def background_task(task_id, youtube_url):
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE
 
-        with YoutubeDL(ydl_opts) as ydl:
-            ydl.download([youtube_url])
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                ydl.download([youtube_url])
+        except Exception:
+            logging.warning("Download with cookies failed, retrying without cookies")
+            ydl_opts.pop('cookiefile', None)
+            with YoutubeDL(ydl_opts) as ydl:
+                ydl.download([youtube_url])
+
         tasks[task_id].update(status='downloaded', percent=50)
 
         # ───────────────────────────────────────────────────────────────────────
