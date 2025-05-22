@@ -98,8 +98,7 @@ def background_task(task_id, youtube_url):
             'quiet': True,
             'geo_bypass': True,
             'nocheckcertificate': True,
-            'http_headers': COMMON_HEADERS,
-            'player_client': 'tv',       # <<< force the TV client (no PO token needed)
+            'http_headers': COMMON_HEADERS
         }
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
@@ -129,8 +128,7 @@ def background_task(task_id, youtube_url):
             }],
             'geo_bypass': True,
             'nocheckcertificate': True,
-            'http_headers': COMMON_HEADERS,
-            'player_client': 'tv',       # <<< same here
+            'http_headers': COMMON_HEADERS
         }
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE

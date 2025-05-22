@@ -2,4 +2,4 @@ Flask
 pytube
 moviepy
 gunicorn
-yt-dlp==2025.03.31
+yt-dlp
