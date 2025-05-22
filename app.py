@@ -5,11 +5,11 @@ import time
 import uuid
 import threading
 import logging
-import base64
 import io
 import zipfile
+
 import requests
-from http.cookiejar import MozillaCookieJar  # for loading cookies and extracting visitor token
+from http.cookiejar import MozillaCookieJar
 from flask import (
     Flask,
     request,
@@ -22,6 +22,12 @@ from flask import (
 from yt_dlp import YoutubeDL
 from yt_dlp.version import __version__ as ytdlp_version
 from urllib.parse import urlparse, parse_qs
+import tempfile
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Playwright import for headless‐Chromium cookie refresh
+# ───────────────────────────────────────────────────────────────────────────────
+from playwright.sync_api import sync_playwright
 
 # ───────────────────────────────────────────────────────────────────────────────
 # APP INITIALIZATION & LOGGING
@@ -30,7 +36,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# COMMON HEADERS & COOKIE DECODE
+# COMMON HEADERS & COOKIE FILE LOCATION
 # ───────────────────────────────────────────────────────────────────────────────
 COMMON_HEADERS = {
     'User-Agent': (
@@ -42,19 +48,51 @@ COMMON_HEADERS = {
     'Referer': 'https://www.youtube.com'
 }
 
-COOKIE_FILE = None
-b64 = os.environ.get('YT_COOKIES_B64')
-if b64:
-    COOKIE_FILE = '/tmp/youtube_cookies.txt'
-    decoded = base64.b64decode(b64)
-    with open(COOKIE_FILE, 'wb') as f:
-        f.write(decoded)
-    logging.info(f"Wrote cookie file ({len(decoded)} bytes) to {COOKIE_FILE}")
-    lines = open(COOKIE_FILE, 'r', errors='ignore').read().splitlines()
-    logging.info(f"Cookie file has {len(lines)} lines; full contents:\n" + "\n".join(lines))
+# Always write our fresh cookies here, in the real OS temp folder:
+COOKIE_FILE = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
+
 
 # ───────────────────────────────────────────────────────────────────────────────
-# CONSTANTS & HELPERS
+# Refresh cookies by spinning up a headless Chromium, visiting YouTube,
+# running any JS (consent banner, bot-checks), and dumping the resulting cookies
+# ───────────────────────────────────────────────────────────────────────────────
+def refresh_cookies():
+    # remove any old cookie file
+    if os.path.exists(COOKIE_FILE):
+        os.remove(COOKIE_FILE)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+
+        # Visit YouTube homepage (runs all JS, consent banners, etc.)
+        page.goto("https://www.youtube.com", timeout=15000)
+
+        # If a consent banner appears, click “I Agree”
+        try:
+            page.click("button:has-text('I Agree')", timeout=5000)
+        except:
+            pass
+
+        # Grab all cookies from the browser context
+        cookies = context.cookies()
+        jar = MozillaCookieJar(COOKIE_FILE)
+        for c in cookies:
+            jar.set_cookie(requests.cookies.create_cookie(
+                name=c["name"], value=c["value"],
+                domain=c["domain"], path=c["path"],
+                secure=c["secure"], rest={"HttpOnly": c["httpOnly"]}
+            ))
+        # Save to disk for yt-dlp
+        jar.save(ignore_discard=True, ignore_expires=True)
+        logging.info(f"Fetched fresh cookies ({len(cookies)} total) to {COOKIE_FILE}")
+
+        browser.close()
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Other helpers / unchanged functions
 # ───────────────────────────────────────────────────────────────────────────────
 YOUTUBE_REGEX = re.compile(
     r'^(https?://)?(www\.)?'
@@ -64,23 +102,6 @@ YOUTUBE_REGEX = re.compile(
 
 DOWNLOAD_BASE = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_BASE, exist_ok=True)
-
-def refresh_cookies():
-    # remove an old cookie file if it exists
-    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
-        os.remove(COOKIE_FILE)
-
-    # start a session, hit the homepage, capture its cookies
-    session = requests.Session()
-    session.headers.update(COMMON_HEADERS)
-    session.get("https://www.youtube.com", timeout=10)
-
-    # dump into a MozillaCookieJar for yt-dlp
-    jar = MozillaCookieJar(COOKIE_FILE)
-    for c in session.cookies:
-        jar.set_cookie(c)      # copy requests’ cookies into jar
-    jar.save(ignore_discard=True, ignore_expires=True)
-    logging.info(f"Fetched fresh guest cookies ({len(session.cookies)} total) to {COOKIE_FILE}")
 
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name)
@@ -105,16 +126,15 @@ def extract_video_id(url):
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# BACKGROUND TASK MANAGEMENT
+# BACKGROUND TASK MANAGEMENT (unchanged except for cookie refresh call)
 # ───────────────────────────────────────────────────────────────────────────────
 tasks = {}
 
 def background_task(task_id, youtube_url):
-    # ─── 0) Log & refresh cookies ────────────────────────────────────────
+    # 0) Log version and refresh cookies
     app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
-    app.logger.info(f"▶ cookies length: {len(os.environ.get('YT_COOKIES_B64',''))}")
-    if COOKIE_FILE:
-        refresh_cookies()
+    # Always refresh to get a fully-hydrated cookie jar
+    refresh_cookies()
 
     start_time   = time.time()
     inv_base     = os.environ.get('INVIDIOUS_BASE_URL')
@@ -122,20 +142,19 @@ def background_task(task_id, youtube_url):
     inv_fallback = False
 
     try:
-        # ─── 1) Build extractor args (with TV client to dodge bot checks) ────
+        # 1) Build extractor args (with TV client to dodge bot checks)
         extractor_args = [
             'player_skip=webpage,configs',
-            'player_client=tv'   # tell YouTube to serve the “TV” API, which is less locked down
+            'player_client=tv'
         ]
-        
-        if COOKIE_FILE:
+        if os.path.exists(COOKIE_FILE):
             jar = MozillaCookieJar(); jar.load(COOKIE_FILE)
             vis = jar._cookies.get('.youtube.com', {}).get('/', {}).get('VISITOR_INFO1_LIVE')
             if vis:
                 extractor_args.append(f"visitor_data={vis.value}")
                 app.logger.info("Using visitor_data from cookies for Innertube API")
 
-        # ─── 2) METADATA: Tier 1 (cookies) → Tier 2 (anon) → Tier 3 (Invidious watch URL) ─
+        # 2) Metadata: cookies → anon → Invidious (unchanged)
         info_opts = {
             'quiet': True,
             'geo_bypass': True,
@@ -144,10 +163,8 @@ def background_task(task_id, youtube_url):
             'downloader': 'curl_cffi',
             'extractor_args': {'youtube': extractor_args},
             'listformats': True,
+            'cookiefile': COOKIE_FILE,
         }
-        if COOKIE_FILE:
-            info_opts['cookiefile'] = COOKIE_FILE
-
         try:
             with YoutubeDL(info_opts) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
@@ -162,8 +179,7 @@ def background_task(task_id, youtube_url):
                 app.logger.warning("Anonymous metadata failed – retrying via Invidious URL")
                 if not inv_base:
                     raise
-                # construct the Invidious watch URL
-                vid     = parse_qs(urlparse(youtube_url).query).get('v', [None])[0]
+                vid     = extract_video_id(youtube_url)
                 inv_url = f"{inv_base.rstrip('/')}/watch?v={vid}"
                 with YoutubeDL({
                     'quiet': True,
@@ -174,31 +190,29 @@ def background_task(task_id, youtube_url):
                 }) as ydl:
                     info = ydl.extract_info(inv_url, download=False)
 
-        # ─── 3) Prepare title, chapters, folder ────────────────────────────
+        # 3) Prepare title/chapters/folder
         title    = info.get('title', youtube_url)
         chapters = info.get('chapters') or []
         folder   = get_download_folder(title)
 
-        # ─── 4) DOWNLOAD: Tier 1 → Tier 2 → mark for Invidious ─────────────
+        # 4) Download audio (cookies → anon → Invidious fallback)
         def dl_hook(d):
             if d['status']=='downloading' and d.get('total_bytes'):
                 pct = d['downloaded_bytes']/d['total_bytes']*45 + 5
                 tasks[task_id].update(status='downloading', percent=pct)
 
         ydl_opts = {
-            'format':            'bestaudio[ext=m4a]/bestaudio/best',
-            'progress_hooks':    [dl_hook],
-            'outtmpl':           os.path.join(folder, 'full_audio.%(ext)s'),
-            'postprocessors':    [{'key':'FFmpegExtractAudio','preferredcodec':'mp3','preferredquality':'192'}],
-            'geo_bypass':        True,
-            'nocheckcertificate':True,
-            'http_headers':      COMMON_HEADERS,
-            'downloader':        'curl_cffi',
-            'extractor_args':    {'youtube': extractor_args},
+            'format':             'bestaudio[ext=m4a]/bestaudio/best',
+            'progress_hooks':     [dl_hook],
+            'outtmpl':            os.path.join(folder, 'full_audio.%(ext)s'),
+            'postprocessors':     [{'key':'FFmpegExtractAudio','preferredcodec':'mp3','preferredquality':'192'}],
+            'geo_bypass':         True,
+            'nocheckcertificate': True,
+            'http_headers':       COMMON_HEADERS,
+            'downloader':         'curl_cffi',
+            'extractor_args':     {'youtube': extractor_args},
+            'cookiefile':         COOKIE_FILE,
         }
-        if COOKIE_FILE:
-            ydl_opts['cookiefile'] = COOKIE_FILE
-
         try:
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([youtube_url])
@@ -213,27 +227,26 @@ def background_task(task_id, youtube_url):
                 app.logger.warning("Anonymous download failed – will use Invidious URL")
                 inv_fallback = True
 
-        # ─── 5) FINAL Tier 3: Use Invidious watch URL for audio if needed ────
         full_mp3 = os.path.join(folder, 'full_audio.mp3')
         if inv_fallback and inv_url:
             app.logger.warning("Using Invidious watch URL fallback for download")
             with YoutubeDL({
                 'quiet': True,
-                'format': 'bestaudio[ext=m4a]/bestaudio/best',
-                'progress_hooks': [dl_hook],
-                'outtmpl': os.path.join(folder, 'full_audio.%(ext)s'),
-                'postprocessors': [{'key':'FFmpegExtractAudio','preferredcodec':'mp3','preferredquality':'192'}],
+                'format':             'bestaudio[ext=m4a]/bestaudio/best',
+                'progress_hooks':     [dl_hook],
+                'outtmpl':            os.path.join(folder, 'full_audio.%(ext)s'),
+                'postprocessors':     [{'key':'FFmpegExtractAudio','preferredcodec':'mp3','preferredquality':'192'}],
                 'nocheckcertificate': True,
-                'geo_bypass': True,
-                'downloader': 'curl_cffi',
-                'extractor_args': {'youtube': extractor_args},
-                'nocookies': True,
+                'geo_bypass':         True,
+                'downloader':         'curl_cffi',
+                'extractor_args':     {'youtube': extractor_args},
+                'nocookies':          True,
             }) as ydl:
                 ydl.download([inv_url])
 
         tasks[task_id].update(status='downloaded', percent=50)
 
-        # ─── 6) Split/rename ────────────────────────────────────────────────
+        # 5) Split into chapters (unchanged)
         files = []
         if not chapters:
             final = f"{sanitize_filename(title)}.mp3"
@@ -255,7 +268,7 @@ def background_task(task_id, youtube_url):
                 tasks[task_id].update(status='splitting', percent=pct)
             os.remove(full_mp3)
 
-        # ─── 7) Finalize ───────────────────────────────────────────────────
+        # 6) Finalize
         elapsed = time.time() - start_time
         tasks[task_id].update(
             status='done', percent=100,
@@ -271,6 +284,7 @@ def background_task(task_id, youtube_url):
     except Exception as e:
         logging.exception("Task failed")
         tasks[task_id].update(status='error', error=str(e))
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # ROUTES (unchanged)

@@ -15,6 +15,8 @@ RUN pip install --upgrade pip \
  && pip install -U --pre "yt-dlp[default,curl-cffi]" \
  && pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
+RUN playwright install --with-deps chromium
+
 # 3) Application code & runtime
 COPY . .
 
