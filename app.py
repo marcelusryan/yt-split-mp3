@@ -77,9 +77,9 @@ def refresh_cookies(video_url: str):
         page = context.new_page()
 
         # 1) Hit the homepage for the global consent banner
-        page.goto("https://www.youtube.com", timeout=15_000)
+        page.goto("https://www.youtube.com", timeout=60_000)
         try:
-            page.click("button:has-text('I Agree')", timeout=5_000)
+            page.click("button:has-text('I Agree')", timeout=60_000)
         except:
             pass
 
