@@ -1,5 +1,3 @@
-# app.py
-
 import os
 import subprocess
 import re
@@ -11,6 +9,7 @@ import base64
 import io
 import zipfile
 
+from http.cookiejar import MozillaCookieJar  # for loading cookies and extracting visitor token
 from flask import (
     Flask,
     request,
@@ -50,7 +49,6 @@ if b64:
     with open(COOKIE_FILE, 'wb') as f:
         f.write(decoded)
     logging.info(f"Wrote cookie file ({len(decoded)} bytes) to {COOKIE_FILE}")
-    # — log every line so you can verify all cookies are present —
     lines = open(COOKIE_FILE, 'r', errors='ignore').read().splitlines()
     logging.info(f"Cookie file has {len(lines)} lines; full contents:\n" + "\n".join(lines))
 
@@ -63,7 +61,6 @@ YOUTUBE_REGEX = re.compile(
     r'[\w-]{11}'
 )
 
-# Now store everything under a local `/downloads` folder in your app dir
 DOWNLOAD_BASE = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_BASE, exist_ok=True)
 
@@ -90,39 +87,58 @@ tasks = {}
 def background_task(task_id, youtube_url):
     app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
     app.logger.info(f"▶ cookies length: {len(os.environ.get('YT_COOKIES_B64',''))}")
-    
+
     start_time = time.time()
     try:
-        # 1) Fetch metadata
+        # ───────────────────────────────────────────────────────────────────────
+        # COOKIE & INNERTUBE VISITOR TOKEN
+        # ───────────────────────────────────────────────────────────────────────
+        # Load cookies into a jar so we can extract the VISITOR_INFO1_LIVE token
+        extractor_args = ['player_skip=webpage,configs']
+        if COOKIE_FILE:
+            jar = MozillaCookieJar()
+            jar.load(COOKIE_FILE)
+            vis = (
+                jar._cookies
+                   .get('.youtube.com', {})
+                   .get('/', {})
+                   .get('VISITOR_INFO1_LIVE')
+            )
+            if vis:
+                visitor_data = vis.value
+                extractor_args.append(f'visitor_data={visitor_data}')
+                app.logger.info("Using visitor_data from cookies for Innertube API")
+
+        # ───────────────────────────────────────────────────────────────────────
+        # 1) Fetch metadata (with curl-impersonate + skip HTML & TV config)
+        # ───────────────────────────────────────────────────────────────────────
         info_opts = {
-            'quiet': True,
-            'geo_bypass': True,
+            'quiet':            True,
+            'geo_bypass':       True,
             'nocheckcertificate': True,
-            'http_headers': COMMON_HEADERS,
-            # force Android _and_ skip the config fetch that falls back to TV
-            'extractor_args': {
-                'youtube': [
-                    'player_client=android',
-                    'player_skip=configs'
-                ]
-            }
+            'http_headers':     COMMON_HEADERS,
+            'downloader':       'curl_cffi',              # use curl-impersonate for real TLS fingerprint
+            'extractor_args':   {'youtube': extractor_args},
+            'listformats':      True                      # show formats in logs for debugging
         }
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
 
-        info_opts['listformats'] = True #  Verify available formats with --list-formats
+        # Try once with cookies, then fallback to anonymous if needed
         try:
             with YoutubeDL(info_opts) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
         except Exception:
-            # retry without cookies if the first attempt failed
             info_opts.pop('cookiefile', None)
             with YoutubeDL(info_opts) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
+
         title = info.get('title', youtube_url)
         chapters = info.get('chapters') or []
 
-        # 2) Download full audio
+        # ───────────────────────────────────────────────────────────────────────
+        # 2) Download full audio (same curl-impersonate + skip config)
+        # ───────────────────────────────────────────────────────────────────────
         folder = get_download_folder(title)
 
         def dl_hook(d):
@@ -131,25 +147,19 @@ def background_task(task_id, youtube_url):
                 tasks[task_id].update(status='downloading', percent=pct)
 
         ydl_opts = {
-            # try m4a → webm → best
-            'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
-            'progress_hooks': [dl_hook],
-            'outtmpl': os.path.join(folder, 'full_audio.%(ext)s'),
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
+            'format':            'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+            'progress_hooks':    [dl_hook],
+            'outtmpl':           os.path.join(folder, 'full_audio.%(ext)s'),
+            'postprocessors':    [{
+                'key':            'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'geo_bypass': True,
+            'geo_bypass':        True,
             'nocheckcertificate': True,
-            'http_headers': COMMON_HEADERS,
-            # force Android _and_ skip the config fetch that falls back to TV
-            'extractor_args': {
-                'youtube': [
-                    'player_client=android',
-                    'player_skip=configs'
-                ]
-            }
+            'http_headers':      COMMON_HEADERS,
+            'downloader':        'curl_cffi',
+            'extractor_args':    {'youtube': extractor_args},
         }
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE
@@ -158,7 +168,9 @@ def background_task(task_id, youtube_url):
             ydl.download([youtube_url])
         tasks[task_id].update(status='downloaded', percent=50)
 
+        # ───────────────────────────────────────────────────────────────────────
         # 3) Split into chapters (or rename single file)
+        # ───────────────────────────────────────────────────────────────────────
         files = []
         if not chapters:
             final = f"{sanitize_filename(title)}.mp3"
@@ -185,7 +197,9 @@ def background_task(task_id, youtube_url):
                 tasks[task_id].update(status='splitting', percent=pct)
             os.remove(os.path.join(folder, 'full_audio.mp3'))
 
+        # ───────────────────────────────────────────────────────────────────────
         # 4) Finalize
+        # ───────────────────────────────────────────────────────────────────────
         elapsed = time.time() - start_time
         tasks[task_id].update(
             status='done',
@@ -204,7 +218,7 @@ def background_task(task_id, youtube_url):
         tasks[task_id].update(status='error', error=str(e))
 
 # ───────────────────────────────────────────────────────────────────────────────
-# ROUTES
+# ROUTES (unchanged)
 # ───────────────────────────────────────────────────────────────────────────────
 @app.route('/start', methods=['POST'])
 def start():

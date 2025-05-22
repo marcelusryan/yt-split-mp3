@@ -15,7 +15,7 @@ WORKDIR /app
 # ─────────────────────────────────────────────────────────────────────────────
 COPY requirements.txt ./
 
-RUN pip install --upgrade pip yt-dlp \
+RUN pip install --upgrade pip "yt-dlp[default,curl-cffi]" \
  && pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
 # ─────────────────────────────────────────────────────────────────────────────
