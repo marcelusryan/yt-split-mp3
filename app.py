@@ -99,11 +99,9 @@ def background_task(task_id, youtube_url):
             'geo_bypass': True,
             'nocheckcertificate': True,
             'http_headers': COMMON_HEADERS,
+            # pass extractor-args as a single "ARG=VAL" string or list of strings
             'extractor_args': {
-                'youtube': {
-                    # force Android client to avoid SSAP stripping out audio/video
-                    'player_client': 'android'
-                }
+                'youtube': ['player_client=android']
             }
         }
         if COOKIE_FILE:
@@ -142,11 +140,9 @@ def background_task(task_id, youtube_url):
             'geo_bypass': True,
             'nocheckcertificate': True,
             'http_headers': COMMON_HEADERS,
+            # pass extractor-args as a single "ARG=VAL" string or list of strings
             'extractor_args': {
-                'youtube': {
-                    # force Android client to avoid SSAP stripping out audio/video
-                    'player_client': 'android'
-                }
+                'youtube': ['player_client=android']
             }
         }
         if COOKIE_FILE:
