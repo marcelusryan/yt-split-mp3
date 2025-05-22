@@ -56,7 +56,7 @@ COOKIE_FILE = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
 # Refresh cookies by spinning up a headless Chromium, visiting YouTube,
 # running any JS (consent banner, bot-checks), and dumping the resulting cookies
 # ───────────────────────────────────────────────────────────────────────────────
-def refresh_cookies():
+def refresh_cookies(video_url: str):
     # remove any old cookie file
     if os.path.exists(COOKIE_FILE):
         os.remove(COOKIE_FILE)
@@ -66,14 +66,17 @@ def refresh_cookies():
         context = browser.new_context()
         page = context.new_page()
 
-        # Visit YouTube homepage (runs all JS, consent banners, etc.)
-        page.goto("https://www.youtube.com", timeout=15000)
-
-        # If a consent banner appears, click “I Agree”
+        # 1) Hit the homepage for the global consent banner
+        page.goto("https://www.youtube.com", timeout=15_000)
         try:
-            page.click("button:has-text('I Agree')", timeout=5000)
+            page.click("button:has-text('I Agree')", timeout=5_000)
         except:
             pass
+
+        # 2) Now load the actual video page so its JS sets the signature tokens
+        page.goto(video_url, timeout=15_000)
+        # wait for the player element to appear (ensures all player-JS cookies are set)
+        page.wait_for_selector("ytd-player", timeout=15_000)
 
         # Grab all cookies from the browser context
         cookies = context.cookies()
@@ -134,7 +137,7 @@ def background_task(task_id, youtube_url):
     # 0) Log version and refresh cookies
     app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
     # Always refresh to get a fully-hydrated cookie jar
-    refresh_cookies()
+    refresh_cookies(youtube_url)
 
     start_time   = time.time()
     inv_base     = os.environ.get('INVIDIOUS_BASE_URL')
