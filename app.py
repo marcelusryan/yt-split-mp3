@@ -62,7 +62,14 @@ def refresh_cookies(video_url: str):
         os.remove(COOKIE_FILE)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox"
+            ],
+        )
+
         context = browser.new_context()
         page = context.new_page()
 
@@ -73,10 +80,15 @@ def refresh_cookies(video_url: str):
         except:
             pass
 
-        # 2) Now load the actual video page so its JS sets the signature tokens
-        page.goto(video_url, timeout=15_000)
-        # wait for the player element to appear (ensures all player-JS cookies are set)
-        page.wait_for_selector("ytd-player", timeout=15_000)
+        # 2) Load the watch page (lighter wait + longer timeout)
+        try:
+            # wait until DOM is parsed (faster than full "load"), give it 30 s max
+            page.goto(video_url, timeout=30_000, wait_until="domcontentloaded")
+            # still ensure the player bootstrapped JS
+            page.wait_for_selector("ytd-player", timeout=10_000)
+        except Exception as e:
+            logging.warning(f"Video page load timed out: {e!r} — proceeding with whatever cookies we have")
+
 
         # Grab all cookies from the browser context
         cookies = context.cookies()
