@@ -99,10 +99,8 @@ def background_task(task_id, youtube_url):
             'geo_bypass': True,
             'nocheckcertificate': True,
             'http_headers': COMMON_HEADERS,
-            # pass extractor-args as a single "ARG=VAL" string or list of strings
-            'extractor_args': {
-                'youtube': ['player_client=android']
-            }
+            # force Android client at the top level:
+            'player_client':     'android',
         }
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
@@ -140,10 +138,8 @@ def background_task(task_id, youtube_url):
             'geo_bypass': True,
             'nocheckcertificate': True,
             'http_headers': COMMON_HEADERS,
-            # pass extractor-args as a single "ARG=VAL" string or list of strings
-            'extractor_args': {
-                'youtube': ['player_client=android']
-            }
+            # force Android client at the top level:
+            'player_client':     'android',
         }
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE
