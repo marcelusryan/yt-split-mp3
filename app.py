@@ -80,14 +80,11 @@ def refresh_cookies(video_url: str):
         except:
             pass
 
-        # 2) Load the watch page (lighter wait + longer timeout)
+        # 2) Load the actual watch page and wait for network to settle
         try:
-            # wait until DOM is parsed (faster than full "load"), give it 30 s max
-            page.goto(video_url, timeout=30_000, wait_until="domcontentloaded")
-            # still ensure the player bootstrapped JS
-            page.wait_for_selector("ytd-player", timeout=10_000)
+            page.goto(video_url, timeout=60_000, wait_until="networkidle")
         except Exception as e:
-            logging.warning(f"Video page load timed out: {e!r} — proceeding with whatever cookies we have")
+            logging.warning(f"Watch‐page networkidle timed out: {e!r}; proceeding with collected cookies")
 
 
         # Grab all cookies from the browser context
