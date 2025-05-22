@@ -1,29 +1,21 @@
-# ─────────────────────────────────────────────────────────────────────────────
 # 1) Base image & ffmpeg
-# ─────────────────────────────────────────────────────────────────────────────
 FROM python:3.9-slim
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg \
+ && apt-get install -y --no-install-recommends ffmpeg git \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2) Install Python deps, pinning yt-dlp *before* anything else
-# ─────────────────────────────────────────────────────────────────────────────
+# 2) Install Python deps (pull nightly directly, then the rest)
 COPY requirements.txt ./
 
-RUN pip install --upgrade pip "yt-dlp[default,curl-cffi]" \
+RUN pip install --upgrade pip \
+ && pip install --no-cache-dir git+https://github.com/yt-dlp/yt-dlp@nightly#egg=yt-dlp \
  && pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
-# …then pull in the very latest nightly build
-RUN yt-dlp --update-to nightly
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 3) Application code & runtime
-# ─────────────────────────────────────────────────────────────────────────────
 COPY . .
 
 EXPOSE 5000
