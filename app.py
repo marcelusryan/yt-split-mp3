@@ -99,8 +99,13 @@ def background_task(task_id, youtube_url):
             'geo_bypass': True,
             'nocheckcertificate': True,
             'http_headers': COMMON_HEADERS,
-            # force Android client at the top level:
-            'player_client':     'android',
+            # force Android _and_ skip the config fetch that falls back to TV
+            'extractor_args': {
+                'youtube': [
+                    'player_client=android',
+                    'player_skip=configs'
+                ]
+            }
         }
         if COOKIE_FILE:
             info_opts['cookiefile'] = COOKIE_FILE
@@ -138,8 +143,13 @@ def background_task(task_id, youtube_url):
             'geo_bypass': True,
             'nocheckcertificate': True,
             'http_headers': COMMON_HEADERS,
-            # force Android client at the top level:
-            'player_client':     'android',
+            # force Android _and_ skip the config fetch that falls back to TV
+            'extractor_args': {
+                'youtube': [
+                    'player_client=android',
+                    'player_skip=configs'
+                ]
+            }
         }
         if COOKIE_FILE:
             ydl_opts['cookiefile'] = COOKIE_FILE
