@@ -18,6 +18,9 @@ COPY requirements.txt ./
 RUN pip install --upgrade pip "yt-dlp[default,curl-cffi]" \
  && pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
+# …then pull in the very latest nightly build
+RUN yt-dlp --update-to nightly
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3) Application code & runtime
 # ─────────────────────────────────────────────────────────────────────────────
