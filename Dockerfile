@@ -12,7 +12,7 @@ WORKDIR /app
 COPY requirements.txt ./
 
 RUN pip install --upgrade pip \
- && pip install --no-cache-dir git+https://github.com/yt-dlp/yt-dlp@nightly#egg=yt-dlp \
+ && pip install -U --pre "yt-dlp[default,curl-cffi]" \
  && pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
 # 3) Application code & runtime
