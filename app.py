@@ -110,21 +110,19 @@ def extract_video_id(url):
 tasks = {}
 
 def background_task(task_id, youtube_url):
-    # ─── 0) Log version & cookie length ───────────────────────────────────
+    # ─── 0) Log & refresh cookies ────────────────────────────────────────
     app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
     app.logger.info(f"▶ cookies length: {len(os.environ.get('YT_COOKIES_B64',''))}")
-
-    # ─── 1) Refresh guest cookies ONCE ───────────────────────────────────
     if COOKIE_FILE:
         refresh_cookies()
 
     start_time   = time.time()
     inv_base     = os.environ.get('INVIDIOUS_BASE_URL')
+    inv_url      = None
     inv_fallback = False
-    info         = None
 
     try:
-        # ─── 2) Build extractor args (with optional visitor_data) ───────────
+        # ─── 1) Build extractor args ─────────────────────────────────────
         extractor_args = ['player_skip=webpage,configs']
         if COOKIE_FILE:
             jar = MozillaCookieJar(); jar.load(COOKIE_FILE)
@@ -133,7 +131,7 @@ def background_task(task_id, youtube_url):
                 extractor_args.append(f"visitor_data={vis.value}")
                 app.logger.info("Using visitor_data from cookies for Innertube API")
 
-        # ─── 3) METADATA: Tier 1 (cookies) → Tier 2 (anon) → Tier 3 (Invidious) ─
+        # ─── 2) METADATA: Tier 1 (cookies) → Tier 2 (anon) → Tier 3 (Invidious watch URL) ─
         info_opts = {
             'quiet': True,
             'geo_bypass': True,
@@ -147,7 +145,6 @@ def background_task(task_id, youtube_url):
             info_opts['cookiefile'] = COOKIE_FILE
 
         try:
-            # Tier 1: with cookies
             with YoutubeDL(info_opts) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
         except Exception:
@@ -155,36 +152,33 @@ def background_task(task_id, youtube_url):
             anon_info = {k: v for k, v in info_opts.items() if k != 'cookiefile'}
             anon_info['nocookies'] = True
             try:
-                # Tier 2: anonymous
                 with YoutubeDL(anon_info) as ydl:
                     info = ydl.extract_info(youtube_url, download=False)
             except Exception:
-                app.logger.warning("Anonymous metadata failed – retrying via Invidious API")
+                app.logger.warning("Anonymous metadata failed – retrying via Invidious URL")
                 if not inv_base:
                     raise
-                # Tier 3: Invidious API JSON endpoint
+                # construct the Invidious watch URL
                 vid     = parse_qs(urlparse(youtube_url).query).get('v', [None])[0]
-                api_url = f"{inv_base.rstrip('/')}/api/v1/videos/{vid}"
-                data    = requests.get(api_url, timeout=10).json()
-                info    = {
-                    'title': data.get('videoDetails', {}).get('title', youtube_url),
-                    'chapters': data.get('chapters', []),
-                    '_inv_audio_url': max(
-                        (f for f in data.get('adaptiveFormats', []) if f.get('mimeType','').startswith('audio/')),
-                        key=lambda x: x.get('bitrate', 0)
-                    )['url']
-                }
-                inv_fallback = True
+                inv_url = f"{inv_base.rstrip('/')}/watch?v={vid}"
+                with YoutubeDL({
+                    'quiet': True,
+                    'nocookies': True,
+                    'downloader': 'curl_cffi',
+                    'http_headers': COMMON_HEADERS,
+                    'extractor_args': {'youtube': extractor_args},
+                }) as ydl:
+                    info = ydl.extract_info(inv_url, download=False)
 
-        # ─── 4) Prepare title, chapters & download folder ──────────────────
+        # ─── 3) Prepare title, chapters, folder ────────────────────────────
         title    = info.get('title', youtube_url)
         chapters = info.get('chapters') or []
         folder   = get_download_folder(title)
 
-        # ─── 5) DOWNLOAD: Tier 1 (cookies) → Tier 2 (anon) → mark fallback ──
+        # ─── 4) DOWNLOAD: Tier 1 → Tier 2 → mark for Invidious ─────────────
         def dl_hook(d):
-            if d['status'] == 'downloading' and d.get('total_bytes'):
-                pct = d['downloaded_bytes'] / d['total_bytes'] * 45 + 5
+            if d['status']=='downloading' and d.get('total_bytes'):
+                pct = d['downloaded_bytes']/d['total_bytes']*45 + 5
                 tasks[task_id].update(status='downloading', percent=pct)
 
         ydl_opts = {
@@ -202,40 +196,40 @@ def background_task(task_id, youtube_url):
             ydl_opts['cookiefile'] = COOKIE_FILE
 
         try:
-            # Tier 1: with cookies
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([youtube_url])
         except Exception:
             app.logger.warning("Download with cookies failed – retrying anonymously")
-            anon_dl = {k: v for k, v in ydl_opts.items() if k != 'cookiefile'}
+            anon_dl = {k: v for k, v in ydl_opts.items() if k!='cookiefile'}
             anon_dl['nocookies'] = True
             try:
-                # Tier 2: anonymous
                 with YoutubeDL(anon_dl) as ydl:
                     ydl.download([youtube_url])
             except Exception:
-                app.logger.warning("Anonymous download failed – will use Invidious fallback")
+                app.logger.warning("Anonymous download failed – will use Invidious URL")
                 inv_fallback = True
 
-        # ─── 6) FINAL TIER 3: Invidious API direct-audio download ──────────
+        # ─── 5) FINAL Tier 3: Use Invidious watch URL for audio if needed ────
         full_mp3 = os.path.join(folder, 'full_audio.mp3')
-        if inv_fallback and '_inv_audio_url' in info:
-            app.logger.warning("Using Invidious API direct-audio fallback")
-            audio_url = info['_inv_audio_url']
+        if inv_fallback and inv_url:
+            app.logger.warning("Using Invidious watch URL fallback for download")
             with YoutubeDL({
                 'quiet': True,
-                'format': 'bestaudio',
+                'format': 'bestaudio[ext=m4a]/bestaudio/best',
                 'progress_hooks': [dl_hook],
                 'outtmpl': os.path.join(folder, 'full_audio.%(ext)s'),
                 'postprocessors': [{'key':'FFmpegExtractAudio','preferredcodec':'mp3','preferredquality':'192'}],
+                'nocheckcertificate': True,
+                'geo_bypass': True,
+                'downloader': 'curl_cffi',
+                'extractor_args': {'youtube': extractor_args},
                 'nocookies': True,
-                'http_headers': COMMON_HEADERS,
             }) as ydl:
-                ydl.download([audio_url])
+                ydl.download([inv_url])
 
         tasks[task_id].update(status='downloaded', percent=50)
 
-        # ─── 7) Split into chapters (or rename single file) ────────────────
+        # ─── 6) Split/rename ────────────────────────────────────────────────
         files = []
         if not chapters:
             final = f"{sanitize_filename(title)}.mp3"
@@ -247,23 +241,20 @@ def background_task(task_id, youtube_url):
                 fname = sanitize_filename(ch['title']) + '.mp3'
                 outp  = os.path.join(folder, fname)
                 subprocess.run([
-                    'ffmpeg', '-y',
-                    '-i', full_mp3,
+                    'ffmpeg','-y','-i', full_mp3,
                     '-ss', str(ch['start_time']),
                     '-to', str(ch['end_time']),
-                    '-c', 'copy',
-                    outp
+                    '-c','copy', outp
                 ], check=True)
                 files.append(fname)
-                pct = 50 + (i / total) * 45
+                pct = 50 + (i/total)*45
                 tasks[task_id].update(status='splitting', percent=pct)
             os.remove(full_mp3)
 
-        # ─── 8) Finalize ───────────────────────────────────────────────────
+        # ─── 7) Finalize ───────────────────────────────────────────────────
         elapsed = time.time() - start_time
         tasks[task_id].update(
-            status='done',
-            percent=100,
+            status='done', percent=100,
             result={
                 'video_title': title,
                 'path':        os.path.basename(folder),
