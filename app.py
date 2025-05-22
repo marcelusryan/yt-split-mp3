@@ -122,8 +122,12 @@ def background_task(task_id, youtube_url):
     inv_fallback = False
 
     try:
-        # ─── 1) Build extractor args ─────────────────────────────────────
-        extractor_args = ['player_skip=webpage,configs']
+        # ─── 1) Build extractor args (with TV client to dodge bot checks) ────
+        extractor_args = [
+            'player_skip=webpage,configs',
+            'player_client=tv'   # tell YouTube to serve the “TV” API, which is less locked down
+        ]
+        
         if COOKIE_FILE:
             jar = MozillaCookieJar(); jar.load(COOKIE_FILE)
             vis = jar._cookies.get('.youtube.com', {}).get('/', {}).get('VISITOR_INFO1_LIVE')
