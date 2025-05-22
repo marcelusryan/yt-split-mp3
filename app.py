@@ -70,7 +70,10 @@ def refresh_cookies(video_url: str):
             ],
         )
 
-        context = browser.new_context()
+        # use a real Chrome UA so YouTube doesn’t serve the “preview” page
+        context = browser.new_context(
+            user_agent=COMMON_HEADERS['User-Agent']
+        )
         page = context.new_page()
 
         # 1) Hit the homepage for the global consent banner
