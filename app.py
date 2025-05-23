@@ -95,11 +95,6 @@ def parse_chapters(description_text):
 COOKIE_FILE = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
 COOKIE_TTL  = 30 * 60  # 30 minutes
 
-def maybe_refresh_cookies(video_url):
-    if not os.path.exists(COOKIE_FILE) or \
-       (time.time() - os.path.getmtime(COOKIE_FILE)) > COOKIE_TTL:
-        refresh_cookies(video_url)
-
 def refresh_cookies(video_url: str):
     if os.path.exists(COOKIE_FILE):
         os.remove(COOKIE_FILE)
@@ -114,18 +109,22 @@ def refresh_cookies(video_url: str):
             ]
         )
         context = browser.new_context(user_agent=COMMON_HEADERS["User-Agent"])
+
+        # Pre-seed “CONSENT=YES” so YouTube won’t show the banner
+        context.add_cookies([{
+            "name":   "CONSENT",
+            "value":  "YES+1",
+            "domain": ".youtube.com",
+            "path":   "/",
+        }])
+
         # hide webdriver flag
         context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
         page = context.new_page()
-        # 1) load home page & accept cookies
+        # 1) load home page (no banner will appear now)
         page.goto("https://www.youtube.com", timeout=30_000)
-        try:
-            page.click('button#introAgreeButton', timeout=5_000)
-            page.wait_for_timeout(2_000)
-        except:
-            pass
         # 2) visit the actual video (so YouTube sets video-level cookies)
         page.goto(video_url, timeout=30_000)
         page.wait_for_load_state("networkidle")
@@ -179,7 +178,7 @@ def background_task(task_id, youtube_url):
     # 0) Log version & refresh cookies
     app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
     try:
-        maybe_refresh_cookies(youtube_url)
+        refresh_cookies(youtube_url)
     except Exception as e:
         app.logger.warning(f"Cookie refresh failed: {e}")
     start_time = time.time()
