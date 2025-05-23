@@ -80,7 +80,7 @@
     });
 
     function pollProgress(id) {
-      fetch(`/progress/${id}`)
+      fetch(`/status/${id}`)
         .then(r => r.json())
         .then(d => {
           if (d.error) return showError(d.error);
