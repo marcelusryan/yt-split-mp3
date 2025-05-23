@@ -138,7 +138,7 @@ def refresh_cookies(video_url: str):
                 secure=c["secure"], rest={"HttpOnly": c["httpOnly"]}
             ))
         jar.save(ignore_discard=True, ignore_expires=True)
-        logging.info(f"Fetched fresh cookies ({len(cookies)} total) to {COOKIE_FILE}")
+        app.logger.info(f"Fetched fresh cookies ({len(cookies)} total) to {COOKIE_FILE}")
         browser.close()
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -177,10 +177,14 @@ tasks   = {}
 def background_task(task_id, youtube_url):
     # 0) Log version & refresh cookies
     app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
+    # make sure we actually fetch cookies (fail loudly if not)
     try:
         refresh_cookies(youtube_url)
-    except Exception as e:
-        app.logger.warning(f"Cookie refresh failed: {e}")
+        app.logger.info(f"✅ Cookies refreshed; jar size: {os.path.getsize(COOKIE_FILE)} bytes")
+    except Exception:
+        app.logger.error("🔥 Cookie refresh failed!", exc_info=True)
+        # re-raise so you see the build-time or runtime error
+        raise
     start_time = time.time()
 
     try:
