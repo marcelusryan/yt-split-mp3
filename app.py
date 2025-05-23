@@ -119,8 +119,16 @@ def refresh_cookies(video_url: str):
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
         page = context.new_page()
+        # 1) load home page & accept cookies
         page.goto("https://www.youtube.com", timeout=30_000)
-        # (handle consent banner if needed…)
+        try:
+            page.click('button#introAgreeButton', timeout=5_000)
+            page.wait_for_timeout(2_000)
+        except:
+            pass
+        # 2) visit the actual video (so YouTube sets video-level cookies)
+        page.goto(video_url, timeout=30_000)
+        page.wait_for_load_state("networkidle")
 
         cookies = context.cookies()
         jar = MozillaCookieJar(COOKIE_FILE)
