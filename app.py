@@ -24,6 +24,51 @@ from yt_dlp.version import __version__ as ytdlp_version
 from urllib.parse import urlparse, parse_qs
 import tempfile
 
+# new at top of file
+from googleapiclient.discovery import build
+
+# … then, after you load env vars …
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
+if not YOUTUBE_API_KEY:
+    raise RuntimeError("Missing YOUTUBE_API_KEY")
+YOUTUBE_SERVICE = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+
+def get_video_metadata(video_id):
+    """
+    Fetches title & description (for chapters) via YouTube Data API.
+    """
+    resp = (
+        YOUTUBE_SERVICE.videos()
+                       .list(part="snippet,contentDetails", id=video_id)
+                       .execute()
+    )
+    items = resp.get("items", [])
+    if not items:
+        raise ValueError(f"No video found for ID {video_id}")
+    sn = items[0]["snippet"]
+    cd = items[0]["contentDetails"]
+    return {
+        "title":       sn["title"],
+        "description": sn.get("description",""),
+        "duration":    cd["duration"],
+    }
+
+def parse_chapters(description_text):
+    """
+    Turns lines like "MM:SS Label" into a list of
+    {'start_time': seconds, 'title': label}.
+    """
+    chapters = []
+    for line in description_text.splitlines():
+        m = re.match(r"(?P<ts>\d{1,2}:\d{2}(?::\d{2})?)\s+(?P<label>.+)", line)
+        if not m:
+            continue
+        ts = m.group("ts")
+        parts = list(map(int, ts.split(":")))
+        secs = parts[-1] + parts[-2]*60 + (parts[0]*3600 if len(parts)==3 else 0)
+        chapters.append({"start_time": secs, "title": m.group("label")})
+    return chapters
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Playwright import for headless‐Chromium cookie refresh
 # ───────────────────────────────────────────────────────────────────────────────
@@ -177,46 +222,40 @@ def background_task(task_id, youtube_url):
                 extractor_args.append(f"visitor_data={vis.value}")
                 app.logger.info("Using visitor_data from cookies for Innertube API")
 
-        # 2) Metadata: cookies → anon → Invidious (unchanged)
-        info_opts = {
-            'quiet': True,
-            'geo_bypass': True,
-            'nocheckcertificate': True,
-            'http_headers': COMMON_HEADERS,
-            'downloader': 'curl_cffi',
-            'extractor_args': {'youtube': extractor_args},
-            'listformats': True,
-            'cookiefile': COOKIE_FILE,
-        }
+        # ── STEP 2: METADATA VIA DATA API (with yt-dlp fallback) ──
         try:
-            with YoutubeDL(info_opts) as ydl:
-                info = ydl.extract_info(youtube_url, download=False)
-        except Exception:
-            app.logger.warning("Metadata with cookies failed – retrying anonymously")
-            anon_info = {k: v for k, v in info_opts.items() if k != 'cookiefile'}
-            anon_info['nocookies'] = True
+            vid = extract_video_id(youtube_url)
+            meta = get_video_metadata(vid)
+            title    = meta["title"]
+            chapters = parse_chapters(meta["description"])
+            app.logger.info(f"Fetched metadata for {vid} via YouTube Data API")
+        except Exception as e:
+            app.logger.warning(f"Data API failed ({e}), falling back to yt-dlp")
+            # fall back to your original yt-dlp metadata extract
+            info_opts = {
+                'quiet': True,
+                'geo_bypass': True,
+                'nocheckcertificate': True,
+                'http_headers': COMMON_HEADERS,
+                'downloader': 'curl_cffi',
+                'extractor_args': {'youtube': extractor_args},
+                'listformats': True,
+                'cookiefile': COOKIE_FILE,
+            }
             try:
-                with YoutubeDL(anon_info) as ydl:
+                with YoutubeDL(info_opts) as ydl:
                     info = ydl.extract_info(youtube_url, download=False)
             except Exception:
-                app.logger.warning("Anonymous metadata failed – retrying via Invidious URL")
-                if not inv_base:
-                    raise
-                vid     = extract_video_id(youtube_url)
-                inv_url = f"{inv_base.rstrip('/')}/watch?v={vid}"
-                with YoutubeDL({
-                    'quiet': True,
-                    'nocookies': True,
-                    'downloader': 'curl_cffi',
-                    'http_headers': COMMON_HEADERS,
-                    'extractor_args': {'youtube': extractor_args},
-                }) as ydl:
-                    info = ydl.extract_info(inv_url, download=False)
+                # your existing anonymous / Invidious fallbacks…
+                anon = {k:v for k,v in info_opts.items() if k!='cookiefile'}
+                anon['nocookies'] = True
+                with YoutubeDL(anon) as ydl:
+                    info = ydl.extract_info(youtube_url, download=False)
+            title    = info.get("title", youtube_url)
+            chapters = info.get("chapters") or []
 
-        # 3) Prepare title/chapters/folder
-        title    = info.get('title', youtube_url)
-        chapters = info.get('chapters') or []
-        folder   = get_download_folder(title)
+        # 3) Prepare download folder using whatever title/chapters we now have
+        folder = get_download_folder(title)
 
         # 4) Download audio (cookies → anon → Invidious fallback)
         def dl_hook(d):
