@@ -170,7 +170,10 @@ tasks   = {}
 def background_task(task_id, youtube_url):
     # 0) Log version & refresh cookies
     app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
-    maybe_refresh_cookies(youtube_url)
+    try:
+        maybe_refresh_cookies(youtube_url)
+    except Exception as e:
+        app.logger.warning(f"Cookie refresh failed: {e}")
     start_time = time.time()
 
     try:
@@ -191,31 +194,34 @@ def background_task(task_id, youtube_url):
             'cookiefile':        COOKIE_FILE,
         }
 
-        # 2) METADATA: Data API first, fallback for title & chapters
         vid = extract_video_id(youtube_url)
+
+        # 2) METADATA: Data API first, fallback for title & chapters
+        
+        # after: two distinct phases
+        # 1) Data API → title + (maybe) chapters
         try:
-            # Primary: Data API for title + description
             meta     = get_video_metadata(vid)
             title    = meta["title"]
-            # Try parsing chapters from the raw description text
             chapters = parse_chapters(meta["description"])
-
-            # ◀─ NEW: If no timestamps in description, fetch via yt-dlp
-            if not chapters:
-                app.logger.info("No description‐chapters found; falling back to yt-dlp for chapters")
-                with YoutubeDL(info_opts) as ydl:
-                    info_meta = ydl.extract_info(youtube_url, download=False)
-                chapters = info_meta.get("chapters") or []
-
-            app.logger.info(f"Fetched metadata for {vid} via YouTube Data API ({len(chapters)} chapters)")
-
         except Exception as e:
-            # Full fallback: yt-dlp for title & chapters
-            app.logger.warning(f"Data API failed ({e}); falling back to yt-dlp")
+            app.logger.warning(f"Data API failed ({e}); falling back to yt-dlp for metadata")
             with YoutubeDL(info_opts) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
             title    = info.get("title", youtube_url)
             chapters = info.get("chapters") or []
+
+        # 2) If Data API gave no chapters, try *only* for chapters
+        if not chapters:
+            try:
+                app.logger.info("No description-chapters; falling back to yt-dlp for chapters")
+                with YoutubeDL(info_opts) as ydl:
+                    info_meta = ydl.extract_info(youtube_url, download=False)
+                chapters = info_meta.get("chapters") or []
+            except Exception as e:
+                app.logger.warning(f"Chapter extraction via yt-dlp failed ({e}); proceeding without chapters")
+                chapters = []
+
 
         # ── NEW: Compute end_time for each chapter ─────────
         if 'meta' in locals():
