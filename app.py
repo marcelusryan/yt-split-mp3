@@ -56,25 +56,33 @@ COOKIE_FILE = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
 # Refresh cookies by spinning up a headless Chromium, visiting YouTube,
 # running any JS (consent banner, bot-checks), and dumping the resulting cookies
 # ───────────────────────────────────────────────────────────────────────────────
+
+COOKIE_TTL = 30 * 60  # seconds
+
+def maybe_refresh_cookies(video_url):
+    if not os.path.exists(COOKIE_FILE) or (time.time() - os.path.getmtime(COOKIE_FILE)) > COOKIE_TTL:
+        refresh_cookies(video_url)
+
 def refresh_cookies(video_url: str):
     # remove any old cookie file
     if os.path.exists(COOKIE_FILE):
         os.remove(COOKIE_FILE)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-            "--no-sandbox",
-            "--disable-setuid-sandbox"
-            ],
-        )
+        # launch args
+        browser = p.chromium.launch(headless=True, args=[
+            "--no-sandbox", "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled"
+        ])
 
         # use a real Chrome UA so YouTube doesn’t serve the “preview” page
         context = browser.new_context(
             user_agent=COMMON_HEADERS['User-Agent']
         )
         page = context.new_page()
+        
+        # hide webdriver
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
 
         # 1) Hit the homepage for the global consent banner
         page.goto("https://www.youtube.com", timeout=60_000)
@@ -149,7 +157,7 @@ def background_task(task_id, youtube_url):
     # 0) Log version and refresh cookies
     app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
     # Always refresh to get a fully-hydrated cookie jar
-    refresh_cookies(youtube_url)
+    maybe_refresh_cookies(youtube_url)
 
     start_time   = time.time()
     inv_base     = os.environ.get('INVIDIOUS_BASE_URL')
@@ -227,6 +235,13 @@ def background_task(task_id, youtube_url):
             'downloader':         'curl_cffi',
             'extractor_args':     {'youtube': extractor_args},
             'cookiefile':         COOKIE_FILE,
+            # to slow things down and back off when you see 429s.
+            'ratelimit': 1000000,            # bytes/sec
+            'sleep_interval_requests': 1.0,  # seconds
+            'retries': 3,
+            # make the download loop even more forgiving under heavy load
+            'sleep_interval_subsequent': 1.0,   # slower still on later requests
+            'throttled_retries':       True,    # auto-retry 429s with backoff
         }
         try:
             with YoutubeDL(ydl_opts) as ydl:
