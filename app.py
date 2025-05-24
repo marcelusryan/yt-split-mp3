@@ -210,6 +210,15 @@ def background_task(task_id, youtube_url):
     maybe_refresh_cookies(youtube_url)
     start_time = time.time()
 
+    # ─── Load the cookies Playwright just saved:
+    jar = MozillaCookieJar(COOKIE_FILE)
+    jar.load(ignore_discard=True, ignore_expires=True)
+
+    # ─── Create a session that uses those cookies + your standard headers
+    session = requests.Session()
+    session.headers.update(COMMON_HEADERS)
+    session.cookies = jar
+
     try:
         # 1) Build extractor args
         extractor_args = [
@@ -304,7 +313,7 @@ def background_task(task_id, youtube_url):
             }
         }
         player_url = f"https://www.youtube.com/youtubei/v1/player?key={YOUTUBE_API_KEY}"
-        resp       = requests.post(player_url, json=payload, headers=COMMON_HEADERS)
+        resp = session.post(player_url, json=payload)
         resp.raise_for_status()
         streaming  = resp.json().get("streamingData", {})
 
@@ -385,7 +394,7 @@ def background_task(task_id, youtube_url):
 
             # 4.3) Download .m4a via requests
             m4a_path = os.path.join(folder, "full_audio.m4a")
-            with requests.get(audio_url, stream=True) as r:
+            with session.get(audio_url, stream=True) as r:
                 r.raise_for_status()
                 with open(m4a_path, "wb") as out:
                     for chunk in r.iter_content(1024*1024):
