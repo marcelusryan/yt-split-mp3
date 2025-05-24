@@ -23,9 +23,26 @@ from flask import (
 )
 from yt_dlp import YoutubeDL
 from yt_dlp.version import __version__ as ytdlp_version
+from yt_dlp.utils import DownloadError
 from urllib.parse import urlparse, parse_qs
 from playwright.sync_api import sync_playwright
 from googleapiclient.discovery import build            # ◀─ NEW: YouTube Data API client
+
+# ─── Instrument HTTP requests for “too many” detection ─────────────────
+REQUEST_TIMESTAMPS = []
+_request_lock = threading.Lock()
+_orig_request = requests.Session.request
+
+def instrumented_request(self, method, url, **kwargs):
+    ts = time.time()
+    try:
+        return _orig_request(self, method, url, **kwargs)
+    finally:
+        with _request_lock:
+            REQUEST_TIMESTAMPS.append(ts)
+
+requests.Session.request = instrumented_request
+# End instrumentation
 
 # ───────────────────────────────────────────────────────────────────────────────
 # CONFIG & CLIENTS
@@ -96,7 +113,17 @@ def parse_chapters(description_text):
 # ───────────────────────────────────────────────────────────────────────────────
 
 COOKIE_FILE = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
-COOKIE_TTL  = 30 * 60  # 30 minutes
+COOKIE_TTL  = 5 * 60  # 5 minutes
+
+def maybe_refresh_cookies(video_url: str):
+    """
+    Refresh only if cookie-jar is missing or older than COOKIE_TTL.
+    """
+    if os.path.exists(COOKIE_FILE) and (time.time() - os.path.getmtime(COOKIE_FILE) < COOKIE_TTL):
+        app.logger.info("▶ Reusing existing cookies (TTL not expired)")
+    else:
+        refresh_cookies(video_url)
+        app.logger.info("▶ Refreshing cookies")
 
 def refresh_cookies(video_url: str):
     if os.path.exists(COOKIE_FILE):
@@ -180,14 +207,7 @@ tasks   = {}
 def background_task(task_id, youtube_url):
     # 0) Log version & refresh cookies
     app.logger.info(f"▶ yt-dlp version: {ytdlp_version}")
-    # make sure we actually fetch cookies (fail loudly if not)
-    try:
-        refresh_cookies(youtube_url)
-        app.logger.info(f"✅ Cookies refreshed; jar size: {os.path.getsize(COOKIE_FILE)} bytes")
-    except Exception:
-        app.logger.error("🔥 Cookie refresh failed!", exc_info=True)
-        # re-raise so you see the build-time or runtime error
-        raise
+    maybe_refresh_cookies(youtube_url)
     start_time = time.time()
 
     try:
@@ -333,12 +353,22 @@ def background_task(task_id, youtube_url):
                 'geo_bypass':           True,
                 'nocheckcertificate':   True,
                 'http_headers':         COMMON_HEADERS,
-                'downloader':           'curl_cffi',
+                'downloader': 'ffmpeg',
+                'external_downloader': 'ffmpeg',
+                # ⬇️ allow https HLS in manifests and force HLS format
+                'external_downloader_args': {
+                    'ffmpeg': [
+                        '-protocol_whitelist', 'file,http,https,tcp,tls',
+                        '-allowed_extensions',    'ALL',
+                        '-f',                     'hls'
+                    ]
+                },
                 'extractor_args':       {'youtube': extractor_args},
                 'cookiefile':           COOKIE_FILE,
                 'ratelimit':            1_000_000,
                 'sleep_interval_requests': 1.0,
                 'retries':              3,
+                'http_chunk_size': 100 * 1024 * 1024,  # 100 MB chunks → far fewer range requests
             }
             anon_opts = {k: v for k, v in ydl_opts.items() if k != 'cookiefile'}
             anon_opts['nocookies'] = True
@@ -346,9 +376,15 @@ def background_task(task_id, youtube_url):
             try:
                 with YoutubeDL(ydl_opts) as ydl:
                     ydl.download([youtube_url])
-            except Exception:
-                with YoutubeDL(anon_opts) as ydl:
-                    ydl.download([youtube_url])
+            except DownloadError:
+                app.logger.warning("⚠️ ffmpeg failed; falling back to curl_cffi downloader")
+                # Copy the same options but remove any ffmpeg hooks
+                fallback_opts = ydl_opts.copy()
+                fallback_opts['downloader'] = 'curl_cffi'
+                fallback_opts.pop('external_downloader', None)
+                fallback_opts.pop('external_downloader_args', None)
+                with YoutubeDL(fallback_opts) as ydl_fallback:
+                    ydl_fallback.download([youtube_url])
 
             full_mp3 = os.path.join(folder, "full_audio.mp3")
         else:
@@ -488,6 +524,16 @@ def download_zip(directory):
 def download_file(directory, filename):
     dirpath = os.path.join("downloads", directory)
     return send_from_directory(dirpath, filename, as_attachment=True)
+
+@app.route('/metrics/requests', methods=['GET'])
+def request_metrics():
+    now = time.time()
+    windows = [30, 60, 300]  # last 30s, 60s, 5m
+    counts = {
+        f"last_{w}s": sum(1 for t in REQUEST_TIMESTAMPS if t >= now - w)
+        for w in windows
+    }
+    return jsonify(counts)
 
 @app.route('/', methods=['GET'])
 def index():
