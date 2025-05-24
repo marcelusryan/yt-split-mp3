@@ -29,7 +29,10 @@ from googleapiclient.discovery import build            # ◀─ NEW: YouTube Dat
 
 # ───────────────────────────────────────────────────────────────────────────────
 # CONFIG & CLIENTS
-# ───────────────────────────────────────────────────────────────────────────────
+# 
+
+# Maximum video length (in seconds) allowed by this service
+MAX_VIDEO_LENGTH_SECS = 90 * 60  # 1 hour 30 minutes
 
 # ◀─ NEW: Load & initialize Data API
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
@@ -427,6 +430,24 @@ def start():
     if not re.match(r'^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/)[\w-]{11}', url):
         return jsonify(error="Invalid YouTube URL."), 400
 
+    # ─── New: enforce max video length ────────────────────────────────────────
+    vid = extract_video_id(url)
+    try:
+        # Try Data API first
+        meta = get_video_metadata(vid)
+        duration_secs = int(parse_duration(meta['duration']).total_seconds())
+    except Exception:
+        # Fallback to yt-dlp if Data API fails
+        with YoutubeDL({'quiet': True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+        duration_secs = info.get('duration', 0) or 0
+
+    if duration_secs > MAX_VIDEO_LENGTH_SECS:
+        return jsonify(
+            error="Video is too long. Maximum allowed length is 1 hour 30 minutes."
+        ), 400
+    # ────────────────────────────────────────────────────────────────────────────
+    
     tid = str(uuid.uuid4())
     tasks[tid] = {'status':'queued','percent':0}
     threading.Thread(target=background_task, args=(tid,url), daemon=True).start()
