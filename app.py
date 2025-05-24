@@ -353,16 +353,7 @@ def background_task(task_id, youtube_url):
                 'geo_bypass':           True,
                 'nocheckcertificate':   True,
                 'http_headers':         COMMON_HEADERS,
-                'downloader': 'ffmpeg',
-                'external_downloader': 'ffmpeg',
-                # ⬇️ allow https HLS in manifests and force HLS format
-                'external_downloader_args': {
-                    'ffmpeg': [
-                        '-protocol_whitelist', 'file,http,https,tcp,tls',
-                        '-allowed_extensions',    'ALL',
-                        '-f',                     'hls'
-                    ]
-                },
+                'downloader': 'curl_cffi',
                 'extractor_args':       {'youtube': extractor_args},
                 'cookiefile':           COOKIE_FILE,
                 'ratelimit':            1_000_000,
